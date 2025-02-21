@@ -165,7 +165,7 @@ constexpr double NOISE_AMPLITUDE = 0; //0.1;
 //constexpr double dt = 1e-4; // 1 x // Before the monopole creation ramp (0 - 200 ms)
 constexpr double dt = 1e-4; // 0.1 x // During and after the monopole creation ramp (200 ms - )
 
-const double IMAGE_SAVE_INTERVAL = 1.0; // ms
+const double IMAGE_SAVE_INTERVAL = 0.1; // ms
 const uint IMAGE_SAVE_FREQUENCY = uint(IMAGE_SAVE_INTERVAL * 0.5 / 1e3 * omega_r / dt) + 1;
 
 const uint STATE_SAVE_INTERVAL = 10.0; // ms
@@ -1892,6 +1892,15 @@ int main(int argc, char** argv)
 		std::cout << "Read config " << argv[1] << std::endl;
 		readConfFile(std::string(argv[1]));
 	}
+
+	std::string k_castin_dum = "lambdas_equal.h5";
+    load_k_data(k_castin_dum, t_data, k_data);
+	std::cout << "Loaded k data" << std::endl;
+
+	// std::cout << "Expansion Constant k = "<< k << std::endl;
+	std::cout << "Grid scaling start time = " << GRID_SCALING_START << " ms" << std::endl;
+	std::cout << "Grid scaling interval = " << SCALING_INTERVAL << " ms" << std::endl;
+	std::cout << "Hold time = " << HOLD_TIME << " ms" << std::endl;
 
 	std::cout << "Start simulating from t = " << t << " ms, with a time step size of " << dt << "." << std::endl;
 	std::cout << "The simulation will end at " << END_TIME << " ms." << std::endl;
