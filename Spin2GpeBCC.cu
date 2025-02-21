@@ -56,7 +56,7 @@ std::string getProjectionString()
 // Experimental field ramps from D.S. Hall (Amherst)
 constexpr double STATE_PREP_DURATION = 0.1;
 constexpr double CREATION_RAMP_DURATION = 0.0177;
-constexpr double HOLD_TIME = 0.; // 0.5;
+constexpr double HOLD_TIME = 0.5; // 0.5;
 constexpr double HOLD_TIME_EXTRA_DELAY = 0.005;
 constexpr double TOTAL_HOLD_TIME = HOLD_TIME + HOLD_TIME_EXTRA_DELAY;
 constexpr double PROJECTION_RAMP_DURATION = 0.120;
@@ -64,7 +64,8 @@ constexpr double OPT_TRAP_OFF_DELAY = 0.020;
 constexpr double OPT_TRAP_OFF = STATE_PREP_DURATION + CREATION_RAMP_DURATION + TOTAL_HOLD_TIME + OPT_TRAP_OFF_DELAY; // When the expansion starts in ms
 constexpr double GRADIENT_OFF_DELAY = 0.010;
 constexpr double GRADIENT_OFF_DUARATION = 0.034;
-constexpr double GRID_SCALING_START = 1.0; // ms
+constexpr double GRID_SCALING_START = TOTAL_HOLD_TIME; // ms
+const double SCALING_INTERVAL = 1e-4;
 
 //#include "AliceRingRamps.h"
 #include "KnotRamps.h"
@@ -80,6 +81,10 @@ constexpr double GRID_SCALING_START = 1.0; // ms
 #include <random>
 
 #include "mesh.h"
+
+#include "calculate_k.h"
+std::vector<double> t_data;
+std::vector<double> k_data;
 
 #define COMPUTE_GROUND_STATE 0
 #define GROUND_STATE_ITERATION_COUNT 10000
@@ -104,12 +109,12 @@ constexpr double REPLICABLE_STRUCTURE_COUNT_X = 112.0;
 //constexpr double REPLICABLE_STRUCTURE_COUNT_Z = 112.0;
 
 //constexpr double k = 0.7569772335291065; // Grid upscale speed for expansion (from QCD code)
-constexpr double k = 1.0; // Grid upscale speed for expansion (from own experiments)
+// constexpr double k = 1.0; // Grid upscale speed for expansion (from own experiments)
 
 constexpr double N = 2e5; // Number of atoms in the condensate
 
-constexpr double trapFreq_r = 126;
-constexpr double trapFreq_z = 166;
+constexpr double trapFreq_r = 136.22; //126
+constexpr double trapFreq_z = 136.22; //166
 
 constexpr double omega_r = trapFreq_r * 2 * PI;
 constexpr double omega_z = trapFreq_z * 2 * PI;
@@ -154,11 +159,11 @@ std::string toStringShort(const double value)
 	return out.str();
 };
 
-const std::string GROUND_STATE_FILENAME = "ground_state_psi_" + toStringShort(DOMAIN_SIZE_X) + "_" + toStringShort(REPLICABLE_STRUCTURE_COUNT_X) + ".dat";
+const std::string GROUND_STATE_FILENAME = "equal_ground_state_psi_" + toStringShort(DOMAIN_SIZE_X) + "_" + toStringShort(REPLICABLE_STRUCTURE_COUNT_X) + ".dat";
 constexpr double NOISE_AMPLITUDE = 0; //0.1;
 
 //constexpr double dt = 1e-4; // 1 x // Before the monopole creation ramp (0 - 200 ms)
-constexpr double dt = 1e-5; // 0.1 x // During and after the monopole creation ramp (200 ms - )
+constexpr double dt = 1e-4; // 0.1 x // During and after the monopole creation ramp (200 ms - )
 
 const double IMAGE_SAVE_INTERVAL = 1.0; // ms
 const uint IMAGE_SAVE_FREQUENCY = uint(IMAGE_SAVE_INTERVAL * 0.5 / 1e3 * omega_r / dt) + 1;
@@ -166,6 +171,7 @@ const uint IMAGE_SAVE_FREQUENCY = uint(IMAGE_SAVE_INTERVAL * 0.5 / 1e3 * omega_r
 const uint STATE_SAVE_INTERVAL = 10.0; // ms
 
 double t = 0; // Start time in ms
+double last_scaling_t = GRID_SCALING_START;
 constexpr double END_TIME = OPT_TRAP_OFF + GRADIENT_OFF_DELAY + GRADIENT_OFF_DUARATION + 24.0; // End time in ms
 
 double relativePhase = 0; // 5.105088062083414; // In radians
@@ -1000,6 +1006,46 @@ __device__ 	double3 getGlobalPos(int blockX, int blockY, int blockZ, int cellIdx
 			 p0.z + blockScale * (blockZ * BLOCK_WIDTH_Z + local.z) };
 };
 
+__global__ void scale(PitchedPtr nextStep, PitchedPtr prevStep, const int4* __restrict__ laplace, const double* __restrict__ hodges, const uint3 dimensions, const double3 prev_p0, const double3 new_p0, const double prevScale, const double newScale)
+{
+	const size_t xid = blockIdx.x * blockDim.x + threadIdx.x;
+	const size_t yid = blockIdx.y * blockDim.y + threadIdx.y;
+	const size_t zid = blockIdx.z * blockDim.z + threadIdx.z;
+	const size_t dataXid = xid / VALUES_IN_BLOCK; // One thread per every dual node so VALUES_IN_BLOCK threads per mesh block (on x-axis)
+	const size_t dualNodeId = xid % VALUES_IN_BLOCK; // Dual node id. One thread per every dual node so VALUES_IN_BLOCK threads per mesh block (on x-axis)
+
+	// Exit leftover threads
+	if (dataXid > dimensions.x || yid > dimensions.y || zid > dimensions.z)
+	{
+		return;
+	}
+
+	const size_t localDataXid = threadIdx.x / VALUES_IN_BLOCK;
+
+	__shared__ BlockPsis ldsPrevPsis[THREAD_BLOCK_Z * THREAD_BLOCK_Y * THREAD_BLOCK_X];
+	const size_t threadIdxInBlock = threadIdx.z * THREAD_BLOCK_Y * THREAD_BLOCK_X + threadIdx.y * THREAD_BLOCK_X + localDataXid;
+
+	// Calculate the pointers for this block
+	char* prevPsi = prevStep.ptr + prevStep.slicePitch * zid + prevStep.pitch * yid + sizeof(BlockPsis) * dataXid;
+	BlockPsis* nextPsi = (BlockPsis*)(nextStep.ptr + nextStep.slicePitch * zid + nextStep.pitch * yid) + dataXid;
+
+	// Update psi
+	const Complex5Vec prev = ((BlockPsis*)prevPsi)->values[dualNodeId];
+
+	// Kill also the leftover edge threads
+	if (dataXid == dimensions.x || yid == dimensions.y || zid == dimensions.z)
+	{
+		return;
+	}
+	__syncthreads();
+
+	double3 prevPos = getGlobalPos(dataXid, yid, zid, dualNodeId, prevScale, prev_p0);
+	double3 newPos = getGlobalPos(dataXid, yid, zid, dualNodeId, newScale, new_p0);
+
+	nextPsi->values[dualNodeId] = prev;
+}
+
+
 __global__ void interpolate(PitchedPtr nextStep, PitchedPtr prevStep, const int4* __restrict__ laplace, const double* __restrict__ hodges, const uint3 dimensions, const double3 prev_p0, const double3 new_p0, const double prevScale, const double newScale)
 {
 	const size_t xid = blockIdx.x * blockDim.x + threadIdx.x;
@@ -1599,7 +1645,12 @@ uint integrateInTime(const double block_scale, const Vector3& minp, const Vector
 	std::string mkdirOptions = "-p ";
 #endif
 
-	std::string dirPrefix = phaseToString(initPhase) + dirSeparator + toStringShort(HOLD_TIME)+"us_winding" + dirSeparator + toString(relativePhase / PI * 180.0, 2) + "_deg_phase" + dirSeparator + getProjectionString() + dirSeparator;
+	std::string dirPrefix = "Testagain"+ dirSeparator + phaseToString(initPhase) + dirSeparator +
+					toString(SCALING_INTERVAL, 6) + "s_scaling" + dirSeparator +
+					toStringShort(GRID_SCALING_START) + "ms_start" + dirSeparator +
+					toStringShort(HOLD_TIME) + "us_winding" + dirSeparator +
+					toString(relativePhase / PI * 180.0, 2) + "_deg_phase" + dirSeparator +
+					getProjectionString() + dirSeparator;
 
 	std::string densDir = dirPrefix; // +"dens";
 	//std::string vtksDir = dirPrefix + "dens_vtks";
@@ -1676,20 +1727,23 @@ uint integrateInTime(const double block_scale, const Vector3& minp, const Vector
 		{
 			// update odd values
 			t += dt / omega_r * 1e3; // [ms]
-			if (t >= GRID_SCALING_START)
+			if (t >= GRID_SCALING_START && (t - last_scaling_t) >= SCALING_INTERVAL)
 			{
+				last_scaling_t = t;
 				const double prevScale = expansionBlockScale;
 				const double3 prev_p0 = expansion_p0;
 
+				double k = interpolate_k(t, t_data, k_data);
+
 				expansionBlockScale += dt / omega_r * 1e3 * k * block_scale;
 				expansion_p0 = compute_p0(expansionBlockScale, xsize, ysize, zsize);
-				volume = expansionBlockScale * expansionBlockScale * block_scale * VOLUME;
+				volume = expansionBlockScale * expansionBlockScale * block_scale * VOLUME; //why not cubed??
 
 				const uint32_t nextBufferIdx = (bufferIdx + 1) % BUFFER_COUNT;
 
-				interpolate << <dimGrid, dimBlock >> > (d_evenPsis[nextBufferIdx], d_evenPsis[bufferIdx], d_lapind, d_hodges, dimensions, prev_p0, expansion_p0, prevScale, expansionBlockScale);
+				scale << <dimGrid, dimBlock >> > (d_evenPsis[nextBufferIdx], d_evenPsis[bufferIdx], d_lapind, d_hodges, dimensions, prev_p0, expansion_p0, prevScale, expansionBlockScale);
 				normalize_h(dimGrid, dimBlock, d_density, d_evenPsis[nextBufferIdx], dimensions, bodies, volume);
-				interpolate << <dimGrid, dimBlock >> > (d_oddPsis[nextBufferIdx], d_oddPsis[bufferIdx], d_lapind, d_hodges, dimensions, prev_p0, expansion_p0, prevScale, expansionBlockScale);
+				scale << <dimGrid, dimBlock >> > (d_oddPsis[nextBufferIdx], d_oddPsis[bufferIdx], d_lapind, d_hodges, dimensions, prev_p0, expansion_p0, prevScale, expansionBlockScale);
 				normalize_h(dimGrid, dimBlock, d_density, d_oddPsis[nextBufferIdx], dimensions, bodies, volume);
 
 				bufferIdx = nextBufferIdx;
@@ -1703,10 +1757,13 @@ uint integrateInTime(const double block_scale, const Vector3& minp, const Vector
 
 			// update even values
 			t += dt / omega_r * 1e3; // [ms]
-			if (t >= GRID_SCALING_START)
+			if (t >= GRID_SCALING_START && (t - last_scaling_t) >= SCALING_INTERVAL)
 			{
+				last_scaling_t = t;
 				const double prevScale = expansionBlockScale;
 				const double3 prev_p0 = expansion_p0;
+
+				double k = interpolate_k(t, t_data, k_data);
 
 				expansionBlockScale += dt / omega_r * 1e3 * k * block_scale;
 				expansion_p0 = compute_p0(expansionBlockScale, xsize, ysize, zsize);
@@ -1714,9 +1771,9 @@ uint integrateInTime(const double block_scale, const Vector3& minp, const Vector
 
 				const uint32_t nextBufferIdx = (bufferIdx + 1) % BUFFER_COUNT;
 
-				interpolate << <dimGrid, dimBlock >> > (d_evenPsis[nextBufferIdx], d_evenPsis[bufferIdx], d_lapind, d_hodges, dimensions, prev_p0, expansion_p0, prevScale, expansionBlockScale);
+				scale << <dimGrid, dimBlock >> > (d_evenPsis[nextBufferIdx], d_evenPsis[bufferIdx], d_lapind, d_hodges, dimensions, prev_p0, expansion_p0, prevScale, expansionBlockScale);
 				normalize_h(dimGrid, dimBlock, d_density, d_evenPsis[nextBufferIdx], dimensions, bodies, volume);
-				interpolate << <dimGrid, dimBlock >> > (d_oddPsis[nextBufferIdx], d_oddPsis[bufferIdx], d_lapind, d_hodges, dimensions, prev_p0, expansion_p0, prevScale, expansionBlockScale);
+				scale << <dimGrid, dimBlock >> > (d_oddPsis[nextBufferIdx], d_oddPsis[bufferIdx], d_lapind, d_hodges, dimensions, prev_p0, expansion_p0, prevScale, expansionBlockScale);
 				normalize_h(dimGrid, dimBlock, d_density, d_oddPsis[nextBufferIdx], dimensions, bodies, volume);
 
 				bufferIdx = nextBufferIdx;
