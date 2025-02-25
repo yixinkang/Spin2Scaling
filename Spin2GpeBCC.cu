@@ -5,7 +5,7 @@
 #define Y_QUANTIZED 1
 #define X_QUANTIZED 2
 
-#define BASIS Z_QUANTIZED
+#define BASIS Y_QUANTIZED
 
 enum class Phase {
 	UN = 0,
@@ -13,7 +13,7 @@ enum class Phase {
 	BN_HORI,
 	CYCLIC
 };
-Phase initPhase = Phase::UN;
+Phase initPhase = Phase::BN_VERT;
 
 std::string phaseToString(Phase phase)
 {
@@ -56,7 +56,7 @@ std::string getProjectionString()
 // Experimental field ramps from D.S. Hall (Amherst)
 constexpr double STATE_PREP_DURATION = 0.1;
 constexpr double CREATION_RAMP_DURATION = 0.0177;
-constexpr double HOLD_TIME = 0.5; // 0.5;
+constexpr double HOLD_TIME = 0.25; // 0.5;
 constexpr double HOLD_TIME_EXTRA_DELAY = 0.005;
 constexpr double TOTAL_HOLD_TIME = HOLD_TIME + HOLD_TIME_EXTRA_DELAY;
 constexpr double PROJECTION_RAMP_DURATION = 0.120;
@@ -65,7 +65,7 @@ constexpr double OPT_TRAP_OFF = STATE_PREP_DURATION + CREATION_RAMP_DURATION + T
 constexpr double GRADIENT_OFF_DELAY = 0.010;
 constexpr double GRADIENT_OFF_DUARATION = 0.034;
 constexpr double GRID_SCALING_START = TOTAL_HOLD_TIME; // ms
-const double SCALING_INTERVAL = 1e-4;
+// const double SCALING_INTERVAL = 1e-5;
 
 //#include "AliceRingRamps.h"
 #include "KnotRamps.h"
@@ -113,8 +113,8 @@ constexpr double REPLICABLE_STRUCTURE_COUNT_X = 112.0;
 
 constexpr double N = 2e5; // Number of atoms in the condensate
 
-constexpr double trapFreq_r = 136.22; //126
-constexpr double trapFreq_z = 136.22; //166
+constexpr double trapFreq_r = 126; //126 136.22 for equal
+constexpr double trapFreq_z = 166; //166
 
 constexpr double omega_r = trapFreq_r * 2 * PI;
 constexpr double omega_z = trapFreq_z * 2 * PI;
@@ -159,13 +159,13 @@ std::string toStringShort(const double value)
 	return out.str();
 };
 
-const std::string GROUND_STATE_FILENAME = "equal_ground_state_psi_" + toStringShort(DOMAIN_SIZE_X) + "_" + toStringShort(REPLICABLE_STRUCTURE_COUNT_X) + ".dat";
-constexpr double NOISE_AMPLITUDE = 0; //0.1;
+const std::string GROUND_STATE_FILENAME = "ground_state_psi_" + toStringShort(DOMAIN_SIZE_X) + "_" + toStringShort(REPLICABLE_STRUCTURE_COUNT_X) + ".dat";
+constexpr double NOISE_AMPLITUDE = 0.1; //0.1;
 
 //constexpr double dt = 1e-4; // 1 x // Before the monopole creation ramp (0 - 200 ms)
-constexpr double dt = 1e-4; // 0.1 x // During and after the monopole creation ramp (200 ms - )
+constexpr double dt = 1e-5; // 0.1 x // During and after the monopole creation ramp (200 ms - )
 
-const double IMAGE_SAVE_INTERVAL = 0.1; // ms
+const double IMAGE_SAVE_INTERVAL = 0.5; // ms
 const uint IMAGE_SAVE_FREQUENCY = uint(IMAGE_SAVE_INTERVAL * 0.5 / 1e3 * omega_r / dt) + 1;
 
 const uint STATE_SAVE_INTERVAL = 10.0; // ms
@@ -1645,9 +1645,7 @@ uint integrateInTime(const double block_scale, const Vector3& minp, const Vector
 	std::string mkdirOptions = "-p ";
 #endif
 
-	std::string dirPrefix = "Testagain"+ dirSeparator + phaseToString(initPhase) + dirSeparator +
-					toString(SCALING_INTERVAL, 6) + "s_scaling" + dirSeparator +
-					toStringShort(GRID_SCALING_START) + "ms_start" + dirSeparator +
+	std::string dirPrefix = "Experiment23ms_radial"+ dirSeparator + phaseToString(initPhase) + dirSeparator +
 					toStringShort(HOLD_TIME) + "us_winding" + dirSeparator +
 					toString(relativePhase / PI * 180.0, 2) + "_deg_phase" + dirSeparator +
 					getProjectionString() + dirSeparator;
@@ -1727,9 +1725,9 @@ uint integrateInTime(const double block_scale, const Vector3& minp, const Vector
 		{
 			// update odd values
 			t += dt / omega_r * 1e3; // [ms]
-			if (t >= GRID_SCALING_START && (t - last_scaling_t) >= SCALING_INTERVAL)
+			if (t >= GRID_SCALING_START)
 			{
-				last_scaling_t = t;
+				// last_scaling_t = t;
 				const double prevScale = expansionBlockScale;
 				const double3 prev_p0 = expansion_p0;
 
@@ -1757,9 +1755,9 @@ uint integrateInTime(const double block_scale, const Vector3& minp, const Vector
 
 			// update even values
 			t += dt / omega_r * 1e3; // [ms]
-			if (t >= GRID_SCALING_START && (t - last_scaling_t) >= SCALING_INTERVAL)
+			if (t >= GRID_SCALING_START)
 			{
-				last_scaling_t = t;
+				// last_scaling_t = t;
 				const double prevScale = expansionBlockScale;
 				const double3 prev_p0 = expansion_p0;
 
@@ -1893,13 +1891,13 @@ int main(int argc, char** argv)
 		readConfFile(std::string(argv[1]));
 	}
 
-	std::string k_castin_dum = "lambdas_equal.h5";
+	std::string k_castin_dum = "lambdas.h5"; // "equal_lambdas.h5" for equal trap frequencies
     load_k_data(k_castin_dum, t_data, k_data);
 	std::cout << "Loaded k data" << std::endl;
 
 	// std::cout << "Expansion Constant k = "<< k << std::endl;
 	std::cout << "Grid scaling start time = " << GRID_SCALING_START << " ms" << std::endl;
-	std::cout << "Grid scaling interval = " << SCALING_INTERVAL << " ms" << std::endl;
+	// std::cout << "Grid scaling interval = " << SCALING_INTERVAL << " ms" << std::endl;
 	std::cout << "Hold time = " << HOLD_TIME << " ms" << std::endl;
 
 	std::cout << "Start simulating from t = " << t << " ms, with a time step size of " << dt << "." << std::endl;
