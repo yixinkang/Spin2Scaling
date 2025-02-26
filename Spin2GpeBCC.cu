@@ -5,7 +5,7 @@
 #define Y_QUANTIZED 1
 #define X_QUANTIZED 2
 
-#define BASIS Y_QUANTIZED
+#define BASIS Z_QUANTIZED
 
 enum class Phase {
 	UN = 0,
@@ -13,7 +13,7 @@ enum class Phase {
 	BN_HORI,
 	CYCLIC
 };
-Phase initPhase = Phase::BN_VERT;
+Phase initPhase = Phase::UN;
 
 std::string phaseToString(Phase phase)
 {
@@ -163,7 +163,7 @@ const std::string GROUND_STATE_FILENAME = "ground_state_psi_" + toStringShort(DO
 constexpr double NOISE_AMPLITUDE = 0.1; //0.1;
 
 //constexpr double dt = 1e-4; // 1 x // Before the monopole creation ramp (0 - 200 ms)
-constexpr double dt = 1e-5; // 0.1 x // During and after the monopole creation ramp (200 ms - )
+constexpr double dt = 1e-4; // 0.1 x // During and after the monopole creation ramp (200 ms - )
 
 const double IMAGE_SAVE_INTERVAL = 0.5; // ms
 const uint IMAGE_SAVE_FREQUENCY = uint(IMAGE_SAVE_INTERVAL * 0.5 / 1e3 * omega_r / dt) + 1;
@@ -1645,7 +1645,7 @@ uint integrateInTime(const double block_scale, const Vector3& minp, const Vector
 	std::string mkdirOptions = "-p ";
 #endif
 
-	std::string dirPrefix = "Experiment23ms_radial"+ dirSeparator + phaseToString(initPhase) + dirSeparator +
+	std::string dirPrefix = "NoField"+ dirSeparator + phaseToString(initPhase) + dirSeparator +
 					toStringShort(HOLD_TIME) + "us_winding" + dirSeparator +
 					toString(relativePhase / PI * 180.0, 2) + "_deg_phase" + dirSeparator +
 					getProjectionString() + dirSeparator;
@@ -1735,7 +1735,7 @@ uint integrateInTime(const double block_scale, const Vector3& minp, const Vector
 
 				expansionBlockScale += dt / omega_r * 1e3 * k * block_scale;
 				expansion_p0 = compute_p0(expansionBlockScale, xsize, ysize, zsize);
-				volume = expansionBlockScale * expansionBlockScale * block_scale * VOLUME; //why not cubed??
+				volume = expansionBlockScale * expansionBlockScale * expansionBlockScale * VOLUME; //why not cubed??
 
 				const uint32_t nextBufferIdx = (bufferIdx + 1) % BUFFER_COUNT;
 
@@ -1765,7 +1765,7 @@ uint integrateInTime(const double block_scale, const Vector3& minp, const Vector
 
 				expansionBlockScale += dt / omega_r * 1e3 * k * block_scale;
 				expansion_p0 = compute_p0(expansionBlockScale, xsize, ysize, zsize);
-				volume = expansionBlockScale * expansionBlockScale * block_scale * VOLUME;
+				volume = expansionBlockScale * expansionBlockScale * expansionBlockScale * VOLUME;
 
 				const uint32_t nextBufferIdx = (bufferIdx + 1) % BUFFER_COUNT;
 

@@ -30,7 +30,7 @@ const std::vector<double> BbDurations = { STATE_PREP_DURATION, CREATION_RAMP_DUR
 const std::vector<RampType> BbTypes = { RampType::CONSTANT, RampType::LINEAR, RampType::CONSTANT, RampType::FAST_EXTRACTION };
 
 // Start with the magnetic field zero being at the center of the condensate
-//Quadrupole ////
+// Quadrupole ////
 // std::array<double, 1> Bqs = { 0.0 };
 // std::array<double, 1> BqDurations = { 100.0 };
 // std::array<RampType, 1> BqTypes = { RampType::CONSTANT };
