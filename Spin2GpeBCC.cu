@@ -64,6 +64,8 @@ constexpr double OPT_TRAP_OFF_DELAY = 0.020;
 constexpr double OPT_TRAP_OFF = STATE_PREP_DURATION + CREATION_RAMP_DURATION + TOTAL_HOLD_TIME + OPT_TRAP_OFF_DELAY; // When the expansion starts in ms
 constexpr double GRADIENT_OFF_DELAY = 0.010;
 constexpr double GRADIENT_OFF_DUARATION = 0.034;
+constexpr double GRID_SCALING_START = TOTAL_HOLD_TIME; // ms
+
 
 //#include "AliceRingRamps.h"
 #include "KnotRamps.h"
@@ -80,7 +82,13 @@ constexpr double GRADIENT_OFF_DUARATION = 0.034;
 
 #include "mesh.h"
 
+// for calculating expansion constant
+#include "calculate_k.h"
+std::vector<double> t_data;
+std::vector<double> k_data;
+
 #define COMPUTE_GROUND_STATE 0
+#define GROUND_STATE_ITERATION_COUNT 10000
 
 #define USE_QUADRATIC_ZEEMAN 0
 #define USE_QUADRUPOLE_OFFSET 0
@@ -97,7 +105,7 @@ constexpr double DOMAIN_SIZE_X = 20.0; //24.0;
 constexpr double DOMAIN_SIZE_Y = 20.0; //24.0;
 constexpr double DOMAIN_SIZE_Z = 20.0; //24.0;
 
-constexpr double REPLICABLE_STRUCTURE_COUNT_X = 112.0;
+constexpr double REPLICABLE_STRUCTURE_COUNT_X = 56.0;
 //constexpr double REPLICABLE_STRUCTURE_COUNT_Y = 112.0;
 //constexpr double REPLICABLE_STRUCTURE_COUNT_Z = 112.0;
 
@@ -106,8 +114,8 @@ constexpr double k = 1.0; // Grid upscale speed for expansion (from own experime
 
 constexpr double N = 2e5; // Number of atoms in the condensate
 
-constexpr double trapFreq_r = 126;
-constexpr double trapFreq_z = 166;
+constexpr double trapFreq_r = 126; //126 136.22 for equal
+constexpr double trapFreq_z = 166; //166
 
 constexpr double omega_r = trapFreq_r * 2 * PI;
 constexpr double omega_z = trapFreq_z * 2 * PI;
@@ -153,17 +161,18 @@ std::string toStringShort(const double value)
 };
 
 const std::string GROUND_STATE_FILENAME = "ground_state_psi_" + toStringShort(DOMAIN_SIZE_X) + "_" + toStringShort(REPLICABLE_STRUCTURE_COUNT_X) + ".dat";
-constexpr double NOISE_AMPLITUDE = 0; //0.1;
+constexpr double NOISE_AMPLITUDE = 0.1; //0.1;
 
 //constexpr double dt = 1e-4; // 1 x // Before the monopole creation ramp (0 - 200 ms)
 constexpr double dt = 1e-5; // 0.1 x // During and after the monopole creation ramp (200 ms - )
 
-const double IMAGE_SAVE_INTERVAL = 0.1; // 1.0; // ms
+const double IMAGE_SAVE_INTERVAL = 0.5; // 1.0; // ms
 const uint IMAGE_SAVE_FREQUENCY = uint(IMAGE_SAVE_INTERVAL * 0.5 / 1e3 * omega_r / dt) + 1;
 
 const uint STATE_SAVE_INTERVAL = 10.0; // ms
 
 double t = 0; // Start time in ms
+double last_scaling_t = GRID_SCALING_START;
 constexpr double END_TIME = OPT_TRAP_OFF + GRADIENT_OFF_DELAY + GRADIENT_OFF_DUARATION + 24.0; // End time in ms
 
 double relativePhase = 0; // 5.105088062083414; // In radians
@@ -558,7 +567,7 @@ __global__ void cyclicState(PitchedPtr psi, uint3 dimensions, double phase = 0) 
 };
 
 #if COMPUTE_GROUND_STATE
-__global__ void itp(PitchedPtr nextStep, PitchedPtr prevStep, const int4* __restrict__ laplace, const double* __restrict__ hodges, MagFields Bs, const uint3 dimensions, const double block_scale, const double3 p0, const double c0, const double c2, const double c4, double t)
+__global__ void itp(PitchedPtr nextStep, PitchedPtr prevStep, const int4* __restrict__ laplace, const double* __restrict__ hodges, MagFields Bs, const uint3 dimensions, const double expansionBlockScale, const double3 p0, const double c0, const double c2, const double c4, double t)
 {
 	const size_t xid = blockIdx.x * blockDim.x + threadIdx.x;
 	const size_t yid = blockIdx.y * blockDim.y + threadIdx.y;
@@ -626,7 +635,7 @@ __global__ void itp(PitchedPtr nextStep, PitchedPtr prevStep, const int4* __rest
 			otherBoundaryZeroCell = ((BlockPsis*)(prevPsi + offset))->values[laplacian.w];
 		}
 
-		const double hodge = hodges[primaryFace] / (block_scale * block_scale);
+		const double hodge = hodges[primaryFace] / (expansionBlockScale * expansionBlockScale);
 		H.s2 += hodge * (otherBoundaryZeroCell.s2 - prev.s2);
 		H.s1 += hodge * (otherBoundaryZeroCell.s1 - prev.s1);
 		H.s0 += hodge * (otherBoundaryZeroCell.s0 - prev.s0);
@@ -646,9 +655,9 @@ __global__ void itp(PitchedPtr nextStep, PitchedPtr prevStep, const int4* __rest
 	const double Fz = c2 * (2.0 * normSq_s2 + normSq_s1 - normSq_s_1 - 2.0 * normSq_s_2);
 
 	const double3 localPos = d_localPos[dualNodeId];
-	const double3 globalPos = { p0.x + block_scale * (dataXid * BLOCK_WIDTH_X + localPos.x),
-		p0.y + block_scale * (yid * BLOCK_WIDTH_Y + localPos.y),
-		p0.z + block_scale * (zid * BLOCK_WIDTH_Z + localPos.z) };
+	const double3 globalPos = { p0.x + expansionBlockScale * (dataXid * BLOCK_WIDTH_X + localPos.x),
+		p0.y + expansionBlockScale * (yid * BLOCK_WIDTH_Y + localPos.y),
+		p0.z + expansionBlockScale * (zid * BLOCK_WIDTH_Z + localPos.z) };
 	//const double totalPot = trap(globalPos, t) + c0 * normSq;
 	double2 ab = { trap(globalPos, t) + c0 * normSq, 0 };
 
@@ -692,10 +701,10 @@ __global__ void itp(PitchedPtr nextStep, PitchedPtr prevStep, const int4* __rest
 	nextPsi->values[dualNodeId].s_2 = prev.s_2 - dt * H.s_2;
 };
 
-__global__ void forwardEuler(PitchedPtr nextStep, PitchedPtr prevStep, int4* __restrict__ laplace, double* __restrict__ hodges, MagFields Bs, uint3 dimensions, double block_scale, double3 p0, double c0, double c2, double c4, double alpha, double t)
+__global__ void forwardEuler(PitchedPtr nextStep, PitchedPtr prevStep, int4* __restrict__ laplace, double* __restrict__ hodges, MagFields Bs, uint3 dimensions, double expansionBlockScale, double3 p0, double c0, double c2, double c4, double alpha, double t)
 {};
 #else
-__global__ void forwardEuler(PitchedPtr nextStep, PitchedPtr prevStep, int4* __restrict__ laplace, double* __restrict__ hodges, MagFields Bs, uint3 dimensions, double block_scale, double3 p0, double c0, double c2, double c4, double alpha, double t)
+__global__ void forwardEuler(PitchedPtr nextStep, PitchedPtr prevStep, int4* __restrict__ laplace, double* __restrict__ hodges, MagFields Bs, uint3 dimensions, double expansionBlockScale, double3 p0, double c0, double c2, double c4, double alpha, double t)
 {
 	const size_t xid = blockIdx.x * blockDim.x + threadIdx.x;
 	const size_t yid = blockIdx.y * blockDim.y + threadIdx.y;
@@ -763,7 +772,7 @@ __global__ void forwardEuler(PitchedPtr nextStep, PitchedPtr prevStep, int4* __r
 			otherBoundaryZeroCell = ((BlockPsis*)(prevPsi + offset))->values[laplacian.w];
 		}
 
-		const double hodge = hodges[primaryFace] / (block_scale * block_scale);
+		const double hodge = hodges[primaryFace] / (expansionBlockScale * expansionBlockScale);
 		H.s2 += hodge * (otherBoundaryZeroCell.s2 - prev.s2);
 		H.s1 += hodge * (otherBoundaryZeroCell.s1 - prev.s1);
 		H.s0 += hodge * (otherBoundaryZeroCell.s0 - prev.s0);
@@ -783,9 +792,9 @@ __global__ void forwardEuler(PitchedPtr nextStep, PitchedPtr prevStep, int4* __r
 	const double Fz = c2 * (2.0 * normSq_s2 + normSq_s1 - normSq_s_1 - 2.0 * normSq_s_2);
 
 	const double3 localPos = d_localPos[dualNodeId];
-	const double3 globalPos = { p0.x + block_scale * (dataXid * BLOCK_WIDTH_X + localPos.x),
-		p0.y + block_scale * (yid * BLOCK_WIDTH_Y + localPos.y),
-		p0.z + block_scale * (zid * BLOCK_WIDTH_Z + localPos.z) };
+	const double3 globalPos = { p0.x + expansionBlockScale * (dataXid * BLOCK_WIDTH_X + localPos.x),
+		p0.y + expansionBlockScale * (yid * BLOCK_WIDTH_Y + localPos.y),
+		p0.z + expansionBlockScale * (zid * BLOCK_WIDTH_Z + localPos.z) };
 	//const double totalPot = trap(globalPos, t) + c0 * normSq;
 	double2 ab = { trap(globalPos, t) + c0 * normSq, -alpha * normSq * normSq };
 
@@ -842,7 +851,7 @@ __global__ void forwardEuler(PitchedPtr nextStep, PitchedPtr prevStep, int4* __r
 	nextPsi->values[dualNodeId].s_2 = prev.s_2 + dt * double2{ H.s_2.y, -H.s_2.x };
 };
 
-__global__ void leapfrog(PitchedPtr nextStep, PitchedPtr prevStep, const int4* __restrict__ laplace, const double* __restrict__ hodges, MagFields Bs, const uint3 dimensions, const double block_scale, const double3 p0, const double c0, const double c2, const double c4, double alpha, double t)
+__global__ void leapfrog(PitchedPtr nextStep, PitchedPtr prevStep, const int4* __restrict__ laplace, const double* __restrict__ hodges, MagFields Bs, const uint3 dimensions, const double expansionBlockScale, const double3 p0, const double c0, const double c2, const double c4, double alpha, double t)
 {
 	const size_t xid = blockIdx.x * blockDim.x + threadIdx.x;
 	const size_t yid = blockIdx.y * blockDim.y + threadIdx.y;
@@ -910,7 +919,7 @@ __global__ void leapfrog(PitchedPtr nextStep, PitchedPtr prevStep, const int4* _
 			otherBoundaryZeroCell = ((BlockPsis*)(prevPsi + offset))->values[laplacian.w];
 		}
 
-		const double hodge = hodges[primaryFace] / (block_scale * block_scale);
+		const double hodge = hodges[primaryFace] / (expansionBlockScale * expansionBlockScale);
 		H.s2 += hodge * (otherBoundaryZeroCell.s2 - prev.s2);
 		H.s1 += hodge * (otherBoundaryZeroCell.s1 - prev.s1);
 		H.s0 += hodge * (otherBoundaryZeroCell.s0 - prev.s0);
@@ -928,9 +937,9 @@ __global__ void leapfrog(PitchedPtr nextStep, PitchedPtr prevStep, const int4* _
 	const double normSq = normSq_s2 + normSq_s1 + normSq_s0 + normSq_s_1 + normSq_s_2;
 
 	const double3 localPos = d_localPos[dualNodeId];
-	const double3 globalPos = { p0.x + block_scale * (dataXid * BLOCK_WIDTH_X + localPos.x),
-		p0.y + block_scale * (yid * BLOCK_WIDTH_Y + localPos.y),
-		p0.z + block_scale * (zid * BLOCK_WIDTH_Z + localPos.z) };
+	const double3 globalPos = { p0.x + expansionBlockScale * (dataXid * BLOCK_WIDTH_X + localPos.x),
+		p0.y + expansionBlockScale * (yid * BLOCK_WIDTH_Y + localPos.y),
+		p0.z + expansionBlockScale * (zid * BLOCK_WIDTH_Z + localPos.z) };
 
 	double2 ab = { trap(globalPos, t) + c0 * normSq, -alpha * normSq * normSq };
 
@@ -989,6 +998,13 @@ __global__ void leapfrog(PitchedPtr nextStep, PitchedPtr prevStep, const int4* _
 	nextPsi->values[dualNodeId].s_2 += 2 * dt * double2{ H.s_2.y, -H.s_2.x };
 };
 #endif
+_device__ 	double3 getGlobalPos(int blockX, int blockY, int blockZ, int cellIdx, const double blockScale, const double3 p0)
+{
+	const double3 local = d_localPos[cellIdx];
+	return { p0.x + blockScale * (blockX * BLOCK_WIDTH_X + local.x),
+			 p0.y + blockScale * (blockY * BLOCK_WIDTH_Y + local.y),
+			 p0.z + blockScale * (blockZ * BLOCK_WIDTH_Z + local.z) };
+};
 //void energy_h(dim3 dimGrid, dim3 dimBlock, double* energyPtr, PitchedPtr psi, PitchedPtr potentials, int4* lapInd, double* hodges, double g, uint3 dimensions, double volume, size_t bodies)
 //{
 //	energy << <dimGrid, dimBlock >> > (energyPtr, psi, potentials, lapInd, hodges, g, dimensions, volume);
@@ -1068,15 +1084,27 @@ SpinMagDens integrateSpinAndDensity(dim3 dimGrid, dim3 dimBlock, double* spinNor
 	return { hSpinNorm, hMagnetization, hDensity };
 }
 
-uint integrateInTime(const double block_scale, const Vector3& minp, const Vector3& maxp)
+double3 compute_p0(const double expansionBlockScale, const uint xsize, const uint ysize, const uint zsize)
+{
+	const double domainSize = expansionBlockScale * BLOCK_WIDTH_X * REPLICABLE_STRUCTURE_COUNT_X;
+	const auto minp = Vector3(-domainSize * 0.5, -domainSize * 0.5, -domainSize * 0.5);
+	const auto maxp = Vector3(domainSize * 0.5, domainSize * 0.5, domainSize * 0.5);
+
+	const Vector3 domain = maxp - minp;
+	const Vector3 p0 = 0.5 * (minp + maxp - expansionBlockScale * Vector3(BLOCK_WIDTH.x * xsize, BLOCK_WIDTH.y * ysize, BLOCK_WIDTH.z * zsize));
+	return { p0.x, p0.y, p0.z };
+}
+
+
+uint integrateInTime(const double expansionBlockScale, const Vector3& minp, const Vector3& maxp)
 {
 	// find dimensions
 	const Vector3 domain = maxp - minp;
-	const uint xsize = uint(domain.x / (block_scale * BLOCK_WIDTH.x)); // + 1;
-	const uint ysize = uint(domain.y / (block_scale * BLOCK_WIDTH.y)); // + 1;
-	const uint zsize = uint(domain.z / (block_scale * BLOCK_WIDTH.z)); // + 1;
-	const Vector3 p0 = 0.5 * (minp + maxp - block_scale * Vector3(BLOCK_WIDTH.x * xsize, BLOCK_WIDTH.y * ysize, BLOCK_WIDTH.z * zsize));
-	const double3 d_p0 = { p0.x, p0.y, p0.z };
+	const uint xsize = uint(domain.x / (expansionBlockScale * BLOCK_WIDTH.x)); // + 1;
+	const uint ysize = uint(domain.y / (expansionBlockScale * BLOCK_WIDTH.y)); // + 1;
+	const uint zsize = uint(domain.z / (expansionBlockScale * BLOCK_WIDTH.z)); // + 1;
+	const Vector3 original_p0 = 0.5 * (minp + maxp - expansionBlockScale * Vector3(BLOCK_WIDTH.x * xsize, BLOCK_WIDTH.y * ysize, BLOCK_WIDTH.z * zsize));
+	const double3 d_original_p0 = compute_p0(expansionBlockScale, xsize, ysize, zsize);
 
 	// compute discrete dimensions
 	const uint bsize = VALUES_IN_BLOCK; // bpos.size(); // number of values inside a block
@@ -1129,7 +1157,7 @@ uint integrateInTime(const double block_scale, const Vector3& minp, const Vector
 	std::cout << "Not using quadrupole field offset." << std::endl;
 #endif
 
-	for (int i = 0; i < hodges.size(); ++i) hodges[i] = -0.5 * hodges[i]; // / (block_scale * block_scale);
+	for (int i = 0; i < hodges.size(); ++i) hodges[i] = -0.5 * hodges[i]; // / (expansionBlockScale * expansionBlockScale);
 
 	int4* d_lapind;
 	checkCudaErrors(cudaMalloc(&d_lapind, lapind.size() * sizeof(int4)));
@@ -1318,7 +1346,7 @@ uint integrateInTime(const double block_scale, const Vector3& minp, const Vector
 	Signal signal;
 	MagFields Bs{ 0 };
 
-	const double volume = block_scale * block_scale * block_scale * VOLUME;
+	double volume = expansionBlockScale * expansionBlockScale * expansionBlockScale * VOLUME;
 
 	if (loadGroundState)
 	{
@@ -1358,7 +1386,7 @@ uint integrateInTime(const double block_scale, const Vector3& minp, const Vector
 		Bs.Bb = BzScale * signal.Bb;
 		Bs.BqQuad = BqQuadScale * signal.Bq;
 		Bs.BbQuad = BzQuadScale * signal.Bb;
-		forwardEuler << <dimGrid, dimBlock >> > (d_evenPsi, d_oddPsi, d_lapind, d_hodges, Bs, dimensions, block_scale, d_p0, c0, c2, c4, alpha, t);
+		forwardEuler << <dimGrid, dimBlock >> > (d_evenPsi, d_oddPsi, d_lapind, d_hodges, Bs, dimensions, expansionBlockScale, d_original_p0, c0, c2, c4, alpha, t);
 	}
 	else
 	{
@@ -1380,14 +1408,14 @@ uint integrateInTime(const double block_scale, const Vector3& minp, const Vector
 			signal = getSignal(0);
 			Bs.Bq = BqScale * signal.Bq;
 			Bs.Bb = BzScale * signal.Bb;
-			drawIandR("GS", h_evenPsi, dxsize, dysize, dzsize, iter, Bs, d_p0, block_scale);
+			drawIandR("GS", h_evenPsi, dxsize, dysize, dzsize, iter, Bs, d_original_p0, expansionBlockScale);
 			printDensity(dimGrid, dimBlock, d_density, d_evenPsi, dimensions, bodies, volume);
 
-			double3 com = centerOfMass(h_evenPsi, bsize, dxsize, dysize, dzsize, block_scale, d_p0);
+			double3 com = centerOfMass(h_evenPsi, bsize, dxsize, dysize, dzsize, expansionBlockScale, d_original_p0);
 			std::cout << "Center of mass: " << com.x << ", " << com.y << ", " << com.z << std::endl;
 		}
 #endif
-		if (iter == 10000)
+		if (iter == GROUND_STATE_ITERATION_COUNT)
 		{
 			checkCudaErrors(cudaMemcpy3D(&evenPsiBackParams));
 			std::ofstream fs(GROUND_STATE_FILENAME, std::ios::binary | std::ios_base::trunc);
@@ -1397,12 +1425,12 @@ uint integrateInTime(const double block_scale, const Vector3& minp, const Vector
 			return 0;
 		}
 		// Take an imaginary time step
-		itp << <dimGrid, dimBlock >> > (d_oddPsi, d_evenPsi, d_lapind, d_hodges, { 0 }, dimensions, block_scale, d_p0, c0, c2, c4, t);
+		itp << <dimGrid, dimBlock >> > (d_oddPsi, d_evenPsi, d_lapind, d_hodges, { 0 }, dimensions, expansionBlockScale, d_original_p0, c0, c2, c4, t);
 		// Normalize
 		normalize_h(dimGrid, dimBlock, d_density, d_oddPsi, dimensions, bodies, volume);
 
 		// Take an imaginary time step
-		itp << <dimGrid, dimBlock >> > (d_evenPsi, d_oddPsi, d_lapind, d_hodges, { 0 }, dimensions, block_scale, d_p0, c0, c2, c4, t);
+		itp << <dimGrid, dimBlock >> > (d_evenPsi, d_oddPsi, d_lapind, d_hodges, { 0 }, dimensions, expansionBlockScale, d_original_p0, c0, c2, c4, t);
 		// Normalize
 		normalize_h(dimGrid, dimBlock, d_density, d_evenPsi, dimensions, bodies, volume);
 
@@ -1446,7 +1474,10 @@ uint integrateInTime(const double block_scale, const Vector3& minp, const Vector
 	std::string mkdirOptions = "-p ";
 #endif
 
-	std::string dirPrefix = phaseToString(initPhase) + dirSeparator + toStringShort(HOLD_TIME)+"us_winding" + dirSeparator + toString(relativePhase / PI * 180.0, 2) + "_deg_phase" + dirSeparator + getProjectionString() + dirSeparator;
+	std::string dirPrefix = "Normalize/56Nodes"+ dirSeparator + phaseToString(initPhase) + dirSeparator +
+	toStringShort(HOLD_TIME) + "us_winding" + dirSeparator +
+	toString(relativePhase / PI * 180.0, 2) + "_deg_phase" + dirSeparator +
+	getProjectionString() + dirSeparator;
 
 	std::string densDir = dirPrefix; // +"dens";
 	//std::string vtksDir = dirPrefix + "dens_vtks";
@@ -1462,7 +1493,7 @@ uint integrateInTime(const double block_scale, const Vector3& minp, const Vector
 	//system(createSpinorVtksDirCommand.c_str());
 	//system(createDatsDirCommand.c_str());
 
-	double expansionBlockScale = block_scale;
+	double3 expansion_p0 = d_original_p0;
 
 	// Measure wall clock time
 	static auto prevTime = std::chrono::high_resolution_clock::now();
@@ -1476,7 +1507,7 @@ uint integrateInTime(const double block_scale, const Vector3& minp, const Vector
 		Bs.Bb = BzScale * signal.Bb;
 		Bs.BqQuad = BqQuadScale * signal.Bq;
 		Bs.BbQuad = BzQuadScale * signal.Bb;
-		leapfrog << <dimGrid, dimBlock >> > (d_oddPsi, d_evenPsi, d_lapind, d_hodges, Bs, dimensions, expansionBlockScale, d_p0, c0, c2, c4, alpha, t);
+		leapfrog << <dimGrid, dimBlock >> > (d_oddPsi, d_evenPsi, d_lapind, d_hodges, Bs, dimensions, expansionBlockScale, d_original_p0, c0, c2, c4, alpha, t);
 		//densityStr += std::to_string(getDensity(dimGrid, dimBlock, d_density, d_oddPsi, dimensions, bodies, volume)) + ", ";
 		//tString += std::to_string(t) + ", ";
 		//std::cout << std::to_string(signal.Bq) + ", ";
@@ -1490,7 +1521,7 @@ uint integrateInTime(const double block_scale, const Vector3& minp, const Vector
 		Bs.Bb = BzScale * signal.Bb;
 		Bs.BqQuad = BqQuadScale * signal.Bq;
 		Bs.BbQuad = BzQuadScale * signal.Bb;
-		leapfrog << <dimGrid, dimBlock >> > (d_evenPsi, d_oddPsi, d_lapind, d_hodges, Bs, dimensions, expansionBlockScale, d_p0, c0, c2, c4, alpha, t);
+		leapfrog << <dimGrid, dimBlock >> > (d_evenPsi, d_oddPsi, d_lapind, d_hodges, Bs, dimensions, expansionBlockScale, d_original_p0, c0, c2, c4, alpha, t);
 		//densityStr += std::to_string(getDensity(dimGrid, dimBlock, d_density, d_evenPsi, dimensions, bodies, volume)) + ", ";
 		//tString += std::to_string(t) + ", ";
 		//std::cout << std::to_string(signal.Bq) + ", ";
@@ -1510,7 +1541,7 @@ uint integrateInTime(const double block_scale, const Vector3& minp, const Vector
 	signal = getSignal(0);
 	Bs.Bq = BqScale * signal.Bq;
 	Bs.Bb = BzScale * signal.Bb;
-	drawDensity(densDir, h_oddPsi, dxsize, dysize, dzsize, t - STATE_PREP_DURATION, Bs, d_p0, block_scale);
+	drawDensity(densDir, h_oddPsi, dxsize, dysize, dzsize, t - STATE_PREP_DURATION, Bs, d_original_p0, expansionBlockScale);
 #endif
 
 	while (t < END_TIME)
@@ -1520,39 +1551,50 @@ uint integrateInTime(const double block_scale, const Vector3& minp, const Vector
 		{
 			// update odd values
 			t += dt / omega_r * 1e3; // [ms]
-			if (t >= OPT_TRAP_OFF) {
-				expansionBlockScale += dt / omega_r * 1e3 * k * block_scale;
+			if (t >= GRID_SCALING_START)
+			{
+				const double prevScale = expansionBlockScale;
+				const double3 prev_p0 = expansion_p0;
+
+				// calculate expansion scale
+				double k = interpolate_k(t, t_data, k_data);
+				expansionBlockScale += dt / omega_r * 1e3 * k * expansionBlockScale;
+				expansion_p0 = compute_p0(expansionBlockScale, xsize, ysize, zsize);
+				volume = expansionBlockScale * expansionBlockScale * expansionBlockScale * VOLUME;
+
 			}
 			signal = getSignal(t);
 			Bs.Bq = BqScale * signal.Bq;
 			Bs.Bb = BzScale * signal.Bb;
 			Bs.BqQuad = BqQuadScale * signal.Bq;
 			Bs.BbQuad = BzQuadScale * signal.Bb;
-			leapfrog << <dimGrid, dimBlock >> > (d_oddPsi, d_evenPsi, d_lapind, d_hodges, Bs, dimensions, expansionBlockScale, d_p0, c0, c2, c4, alpha, t);
-			//densityStr += std::to_string(getDensity(dimGrid, dimBlock, d_density, d_oddPsi, dimensions, bodies, volume)) + ", ";
-			//tString += std::to_string(t) + ", ";
-			//std::cout << std::to_string(signal.Bq) + ", ";
-			//bbString += std::to_string(signal.Bb.z) + ", ";
-			//optTrapString += std::to_string(trap({ maxp.x, maxp.y, maxp.z }, t)) + ", ";
+			leapfrog << <dimGrid, dimBlock >> > (d_oddPsi, d_evenPsi, d_lapind, d_hodges, Bs, dimensions, expansionBlockScale, expansion_p0, c0, c2, c4, alpha, t);
 
 			// update even values
 			t += dt / omega_r * 1e3; // [ms]
-			if (t >= OPT_TRAP_OFF) {
-				expansionBlockScale += dt / omega_r * 1e3 * k * block_scale;
+			if (t >= GRID_SCALING_START)
+			{
+				const double prevScale = expansionBlockScale;
+				const double3 prev_p0 = expansion_p0;
+
+				// calculate expansion scale
+				double k = interpolate_k(t, t_data, k_data);
+				expansionBlockScale += dt / omega_r * 1e3 * k * expansionBlockScale;
+				expansion_p0 = compute_p0(expansionBlockScale, xsize, ysize, zsize);
+				volume = expansionBlockScale * expansionBlockScale * expansionBlockScale * VOLUME;
+
 			}
 			signal = getSignal(t);
 			Bs.Bq = BqScale * signal.Bq;
 			Bs.Bb = BzScale * signal.Bb;
 			Bs.BqQuad = BqQuadScale * signal.Bq;
 			Bs.BbQuad = BzQuadScale * signal.Bb;
-			leapfrog << <dimGrid, dimBlock >> > (d_evenPsi, d_oddPsi, d_lapind, d_hodges, Bs, dimensions, expansionBlockScale, d_p0, c0, c2, c4, alpha, t);
-			//densityStr += std::to_string(getDensity(dimGrid, dimBlock, d_density, d_evenPsi, dimensions, bodies, volume)) + ", ";
-			//tString += std::to_string(t) + ", ";
-			//std::cout << std::to_string(signal.Bq) + ", ";
-			//bbString += std::to_string(signal.Bb.z) + ", ";
-			//optTrapString += std::to_string(trap({ maxp.x, maxp.y, maxp.z }, t)) + ", ";
+			leapfrog << <dimGrid, dimBlock >> > (d_evenPsi, d_oddPsi, d_lapind, d_hodges, Bs, dimensions, expansionBlockScale, expansion_p0, c0, c2, c4, alpha, t);
+
 		}
 #if SAVE_PICTURE
+		std::cout << "N = " << getDensity(dimGrid, dimBlock, d_density, d_oddPsi, dimensions, bodies, volume) << std::endl;
+
 		// Copy back from device memory to host memory
 		checkCudaErrors(cudaMemcpy3D(&oddPsiBackParams));
 
@@ -1564,7 +1606,7 @@ uint integrateInTime(const double block_scale, const Vector3& minp, const Vector
 		signal = getSignal(0);
 		Bs.Bq = BqScale * signal.Bq;
 		Bs.Bb = BzScale * signal.Bb;
-		drawDensity(densDir, h_oddPsi, dxsize, dysize, dzsize, t - STATE_PREP_DURATION, Bs, d_p0, block_scale);
+		drawDensity(densDir, h_oddPsi, dxsize, dysize, dzsize, t - STATE_PREP_DURATION, Bs, expansion_p0, expansionBlockScale);
 #endif
 #if SAVE_STATES
 		// Copy back from device memory to host memory
@@ -1574,8 +1616,8 @@ uint integrateInTime(const double block_scale, const Vector3& minp, const Vector
 		static bool savedState = false;
 		if (t >= 15.0 && !savedState)
 		{
-			//saveVolume(vtksDir, h_oddPsi, bsize, dxsize, dysize, dzsize, block_scale, d_p0, t - STATE_PREP_DURATION);
-			//saveSpinor(spinorVtksDir, h_oddPsi, bsize, dxsize, dysize, dzsize, block_scale, d_p0, t - STATE_PREP_DURATION);
+			saveVolume(vtksDir, h_oddPsi, bsize, dxsize, dysize, dzsize, expansionBlockScale, d_original_p0, t - STATE_PREP_DURATION);
+			saveSpinor(spinorVtksDir, h_oddPsi, bsize, dxsize, dysize, dzsize, expansionBlockScale, d_original_p0, t - STATE_PREP_DURATION);
 
 			std::ofstream oddFs(datsDir + "/" + toString(t) + ".dat", std::ios::binary | std::ios_base::trunc);
 			if (oddFs.fail() != 0) return 1;
@@ -1593,19 +1635,19 @@ uint integrateInTime(const double block_scale, const Vector3& minp, const Vector
 #endif
 	}
 #endif
-	densityStr += "];";
-	tString += "];";
-	bqString += "];";
-	bbString += "];";
-	optTrapString += "];";
+	// densityStr += "];";
+	// tString += "];";
+	// bqString += "];";
+	// bbString += "];";
+	// optTrapString += "];";
 
-	Text textFile;
-	textFile << densityStr << std::endl;
-	textFile << tString << std::endl;
-	textFile << bqString << std::endl;
-	textFile << bbString << std::endl;
-	textFile << optTrapString << std::endl;
-	textFile.save("experimental_field_ramps.m");
+	// Text textFile;
+	// textFile << densityStr << std::endl;
+	// textFile << tString << std::endl;
+	// textFile << bqString << std::endl;
+	// textFile << bbString << std::endl;
+	// textFile << optTrapString << std::endl;
+	// textFile.save("experimental_field_ramps.m");
 
 	cudaError_t err = cudaGetLastError();
 	if (err != cudaSuccess)
@@ -1667,7 +1709,15 @@ int main(int argc, char** argv)
 		std::cout << "Read config " << argv[1] << std::endl;
 		readConfFile(std::string(argv[1]));
 	}
+	std::string k_castin_dum = "lambdas.h5"; // "equal_lambdas.h5" for equal trap frequencies
+    load_k_data(k_castin_dum, t_data, k_data);
+	std::cout << "Loaded k data" << std::endl;
 
+	// std::cout << "Expansion Constant k = "<< k << std::endl;
+	std::cout << "Grid scaling start time = " << GRID_SCALING_START << " ms" << std::endl;
+	// std::cout << "Grid scaling interval = " << SCALING_INTERVAL << " ms" << std::endl;
+	std::cout << "Hold time = " << HOLD_TIME << " ms" << std::endl;
+	
 	std::cout << "Start simulating from t = " << t << " ms, with a time step size of " << dt << "." << std::endl;
 	std::cout << "The simulation will end at " << END_TIME << " ms." << std::endl;
 	//std::cout << "Block scale = " << blockScale << std::endl;
