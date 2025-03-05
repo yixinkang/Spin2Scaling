@@ -87,7 +87,7 @@ std::vector<double> t_data;
 std::vector<double> k_data;
 
 #define COMPUTE_GROUND_STATE 0
-#define GROUND_STATE_ITERATION_COUNT 1000000
+#define GROUND_STATE_ITERATION_COUNT 10000
 
 #define USE_QUADRATIC_ZEEMAN 0
 #define USE_QUADRUPOLE_OFFSET 0
@@ -104,7 +104,7 @@ constexpr double DOMAIN_SIZE_X = 20.0; //24.0;
 constexpr double DOMAIN_SIZE_Y = 20.0; //24.0;
 constexpr double DOMAIN_SIZE_Z = 20.0; //24.0;
 
-constexpr double REPLICABLE_STRUCTURE_COUNT_X = 56.0; // 112^3 *12 ~ 256^3
+constexpr double REPLICABLE_STRUCTURE_COUNT_X = 56.0;
 //constexpr double REPLICABLE_STRUCTURE_COUNT_Y = 112.0;
 //constexpr double REPLICABLE_STRUCTURE_COUNT_Z = 112.0;
 
@@ -172,7 +172,7 @@ const uint STATE_SAVE_INTERVAL = 10.0; // ms
 
 double t = 0; // Start time in ms
 double last_scaling_t = GRID_SCALING_START;
-constexpr double END_TIME = OPT_TRAP_OFF + GRADIENT_OFF_DELAY + GRADIENT_OFF_DUARATION + 23.0; // End time in ms
+constexpr double END_TIME = OPT_TRAP_OFF + GRADIENT_OFF_DELAY + GRADIENT_OFF_DUARATION + 24.0; // End time in ms
 
 double relativePhase = 0; // 5.105088062083414; // In radians
 
@@ -1046,130 +1046,130 @@ __global__ void scale(PitchedPtr nextStep, PitchedPtr prevStep, const int4* __re
 }
 
 
-// __global__ void interpolate(PitchedPtr nextStep, PitchedPtr prevStep, const int4* __restrict__ laplace, const double* __restrict__ hodges, const uint3 dimensions, const double3 prev_p0, const double3 new_p0, const double prevScale, const double newScale)
-// {
-// 	const size_t xid = blockIdx.x * blockDim.x + threadIdx.x;
-// 	const size_t yid = blockIdx.y * blockDim.y + threadIdx.y;
-// 	const size_t zid = blockIdx.z * blockDim.z + threadIdx.z;
-// 	const size_t dataXid = xid / VALUES_IN_BLOCK; // One thread per every dual node so VALUES_IN_BLOCK threads per mesh block (on x-axis)
-// 	const size_t dualNodeId = xid % VALUES_IN_BLOCK; // Dual node id. One thread per every dual node so VALUES_IN_BLOCK threads per mesh block (on x-axis)
+__global__ void interpolate(PitchedPtr nextStep, PitchedPtr prevStep, const int4* __restrict__ laplace, const double* __restrict__ hodges, const uint3 dimensions, const double3 prev_p0, const double3 new_p0, const double prevScale, const double newScale)
+{
+	const size_t xid = blockIdx.x * blockDim.x + threadIdx.x;
+	const size_t yid = blockIdx.y * blockDim.y + threadIdx.y;
+	const size_t zid = blockIdx.z * blockDim.z + threadIdx.z;
+	const size_t dataXid = xid / VALUES_IN_BLOCK; // One thread per every dual node so VALUES_IN_BLOCK threads per mesh block (on x-axis)
+	const size_t dualNodeId = xid % VALUES_IN_BLOCK; // Dual node id. One thread per every dual node so VALUES_IN_BLOCK threads per mesh block (on x-axis)
 
-// 	// Exit leftover threads
-// 	if (dataXid > dimensions.x || yid > dimensions.y || zid > dimensions.z)
-// 	{
-// 		return;
-// 	}
+	// Exit leftover threads
+	if (dataXid > dimensions.x || yid > dimensions.y || zid > dimensions.z)
+	{
+		return;
+	}
 
-// 	const size_t localDataXid = threadIdx.x / VALUES_IN_BLOCK;
+	const size_t localDataXid = threadIdx.x / VALUES_IN_BLOCK;
 
-// 	__shared__ BlockPsis ldsPrevPsis[THREAD_BLOCK_Z * THREAD_BLOCK_Y * THREAD_BLOCK_X];
-// 	const size_t threadIdxInBlock = threadIdx.z * THREAD_BLOCK_Y * THREAD_BLOCK_X + threadIdx.y * THREAD_BLOCK_X + localDataXid;
+	__shared__ BlockPsis ldsPrevPsis[THREAD_BLOCK_Z * THREAD_BLOCK_Y * THREAD_BLOCK_X];
+	const size_t threadIdxInBlock = threadIdx.z * THREAD_BLOCK_Y * THREAD_BLOCK_X + threadIdx.y * THREAD_BLOCK_X + localDataXid;
 
-// 	// Calculate the pointers for this block
-// 	char* prevPsi = prevStep.ptr + prevStep.slicePitch * zid + prevStep.pitch * yid + sizeof(BlockPsis) * dataXid;
-// 	BlockPsis* nextPsi = (BlockPsis*)(nextStep.ptr + nextStep.slicePitch * zid + nextStep.pitch * yid) + dataXid;
+	// Calculate the pointers for this block
+	char* prevPsi = prevStep.ptr + prevStep.slicePitch * zid + prevStep.pitch * yid + sizeof(BlockPsis) * dataXid;
+	BlockPsis* nextPsi = (BlockPsis*)(nextStep.ptr + nextStep.slicePitch * zid + nextStep.pitch * yid) + dataXid;
 
-// 	// Update psi
-// 	const Complex5Vec prev = ((BlockPsis*)prevPsi)->values[dualNodeId];
-// 	ldsPrevPsis[threadIdxInBlock].values[dualNodeId] = prev;
+	// Update psi
+	const Complex5Vec prev = ((BlockPsis*)prevPsi)->values[dualNodeId];
+	ldsPrevPsis[threadIdxInBlock].values[dualNodeId] = prev;
 
-// 	// Kill also the leftover edge threads
-// 	if (dataXid == dimensions.x || yid == dimensions.y || zid == dimensions.z)
-// 	{
-// 		return;
-// 	}
-// 	__syncthreads();
+	// Kill also the leftover edge threads
+	if (dataXid == dimensions.x || yid == dimensions.y || zid == dimensions.z)
+	{
+		return;
+	}
+	__syncthreads();
 
-// 	uint primaryFace = dualNodeId * FACE_COUNT;
+	uint primaryFace = dualNodeId * FACE_COUNT;
 
-// 	double3 prevPositions[FACE_COUNT + 1];
-// 	Complex5Vec prevPsis[FACE_COUNT + 1];
+	double3 prevPositions[FACE_COUNT + 1];
+	Complex5Vec prevPsis[FACE_COUNT + 1];
 
-// 	// Add the Laplacian to the Hamiltonian
-// #pragma unroll
-// 	for (int i = 0; i < FACE_COUNT; ++i)
-// 	{
-// 		const int4 laplacian = laplace[primaryFace];
+	// Add the Laplacian to the Hamiltonian
+#pragma unroll
+	for (int i = 0; i < FACE_COUNT; ++i)
+	{
+		const int4 laplacian = laplace[primaryFace];
 
-// 		int neighbourGlobalX = dataXid + laplacian.x;
-// 		int neighbourGlobalY = yid + laplacian.y;
-// 		int neighbourGlobalZ = zid + laplacian.z;
+		int neighbourGlobalX = dataXid + laplacian.x;
+		int neighbourGlobalY = yid + laplacian.y;
+		int neighbourGlobalZ = zid + laplacian.z;
 
-// 		prevPositions[i] = getGlobalPos(neighbourGlobalX, neighbourGlobalY, neighbourGlobalZ, laplacian.w, prevScale, prev_p0);
+		prevPositions[i] = getGlobalPos(neighbourGlobalX, neighbourGlobalY, neighbourGlobalZ, laplacian.w, prevScale, prev_p0);
 
-// 		const int neighbourThreadX = localDataXid + laplacian.x;
-// 		const int neighbourThreadY = threadIdx.y + laplacian.y;
-// 		const int neighbourThreadZ = threadIdx.z + laplacian.z;
+		const int neighbourThreadX = localDataXid + laplacian.x;
+		const int neighbourThreadY = threadIdx.y + laplacian.y;
+		const int neighbourThreadZ = threadIdx.z + laplacian.z;
 
-// 		Complex5Vec otherBoundaryZeroCell;
-// 		// Read from the local shared memory
-// 		if ((0 <= neighbourThreadX) && (neighbourThreadX < THREAD_BLOCK_X) &&
-// 			(0 <= neighbourThreadY) && (neighbourThreadY < THREAD_BLOCK_Y) &&
-// 			(0 <= neighbourThreadZ) && (neighbourThreadZ < THREAD_BLOCK_Z))
-// 		{
-// 			const int neighbourIdx = neighbourThreadZ * THREAD_BLOCK_Y * THREAD_BLOCK_X + neighbourThreadY * THREAD_BLOCK_X + neighbourThreadX;
-// 			otherBoundaryZeroCell = ldsPrevPsis[neighbourIdx].values[laplacian.w];
-// 		}
-// 		else // Read from the global memory
-// 		{
-// 			const int offset = laplacian.z * prevStep.slicePitch + laplacian.y * prevStep.pitch + laplacian.x * sizeof(BlockPsis);
-// 			otherBoundaryZeroCell = ((BlockPsis*)(prevPsi + offset))->values[laplacian.w];
-// 		}
+		Complex5Vec otherBoundaryZeroCell;
+		// Read from the local shared memory
+		if ((0 <= neighbourThreadX) && (neighbourThreadX < THREAD_BLOCK_X) &&
+			(0 <= neighbourThreadY) && (neighbourThreadY < THREAD_BLOCK_Y) &&
+			(0 <= neighbourThreadZ) && (neighbourThreadZ < THREAD_BLOCK_Z))
+		{
+			const int neighbourIdx = neighbourThreadZ * THREAD_BLOCK_Y * THREAD_BLOCK_X + neighbourThreadY * THREAD_BLOCK_X + neighbourThreadX;
+			otherBoundaryZeroCell = ldsPrevPsis[neighbourIdx].values[laplacian.w];
+		}
+		else // Read from the global memory
+		{
+			const int offset = laplacian.z * prevStep.slicePitch + laplacian.y * prevStep.pitch + laplacian.x * sizeof(BlockPsis);
+			otherBoundaryZeroCell = ((BlockPsis*)(prevPsi + offset))->values[laplacian.w];
+		}
 
-// 		prevPsis[i] = otherBoundaryZeroCell;
+		prevPsis[i] = otherBoundaryZeroCell;
 
-// 		primaryFace++;
-// 	}
+		primaryFace++;
+	}
 
-// 	double3 prevPos = getGlobalPos(dataXid, yid, zid, dualNodeId, prevScale, prev_p0);
-// 	prevPositions[FACE_COUNT] = prevPos;
-// 	prevPsis[FACE_COUNT] = prev;
+	double3 prevPos = getGlobalPos(dataXid, yid, zid, dualNodeId, prevScale, prev_p0);
+	prevPositions[FACE_COUNT] = prevPos;
+	prevPsis[FACE_COUNT] = prev;
 
-// 	double3 newPos = getGlobalPos(dataXid, yid, zid, dualNodeId, newScale, new_p0);
+	double3 newPos = getGlobalPos(dataXid, yid, zid, dualNodeId, newScale, new_p0);
 
-// 	double maxDist = 0;
-// 	int argMax = 0;
-// 	for (int i = 0; i < FACE_COUNT + 1; ++i)
-// 	{
-// 		double dist = mag(newPos - prevPositions[i]);
-// 		if (dist > maxDist)
-// 		{
-// 			maxDist = dist;
-// 			argMax = i;
-// 		}
-// 	}
+	double maxDist = 0;
+	int argMax = 0;
+	for (int i = 0; i < FACE_COUNT + 1; ++i)
+	{
+		double dist = mag(newPos - prevPositions[i]);
+		if (dist > maxDist)
+		{
+			maxDist = dist;
+			argMax = i;
+		}
+	}
 
-// 	int closestIndices[FACE_COUNT];
-// 	int count = 0;
-// 	for (int i = 0; i < FACE_COUNT + 1; ++i)
-// 	{
-// 		if (i != argMax)
-// 		{
-// 			closestIndices[count] = i;
-// 			count++;
-// 		}
-// 	}
+	int closestIndices[FACE_COUNT];
+	int count = 0;
+	for (int i = 0; i < FACE_COUNT + 1; ++i)
+	{
+		if (i != argMax)
+		{
+			closestIndices[count] = i;
+			count++;
+		}
+	}
 
-// 	double4 weights = baryCoords(prevPositions[closestIndices[0]],
-// 								 prevPositions[closestIndices[1]],
-// 								 prevPositions[closestIndices[2]],
-// 								 prevPositions[closestIndices[3]],
-// 								 newPos);
+	double4 weights = baryCoords(prevPositions[closestIndices[0]],
+								 prevPositions[closestIndices[1]],
+								 prevPositions[closestIndices[2]],
+								 prevPositions[closestIndices[3]],
+								 newPos);
 
-// 	Complex5Vec interpolated;
-// 	for (int i = 0; i < FACE_COUNT; ++i)
-// 	{
-// 		auto neighbour = prevPsis[closestIndices[i]];
-// 		auto weight = subscript(weights, i);
-// 		interpolated.s2 += weight * neighbour.s2;
-// 		interpolated.s1 += weight * neighbour.s1;
-// 		interpolated.s0 += weight * neighbour.s0;
-// 		interpolated.s_1 += weight * neighbour.s_1;
-// 		interpolated.s_2 += weight * neighbour.s_2;
-// 	}
+	Complex5Vec interpolated;
+	for (int i = 0; i < FACE_COUNT; ++i)
+	{
+		auto neighbour = prevPsis[closestIndices[i]];
+		auto weight = subscript(weights, i);
+		interpolated.s2 += weight * neighbour.s2;
+		interpolated.s1 += weight * neighbour.s1;
+		interpolated.s0 += weight * neighbour.s0;
+		interpolated.s_1 += weight * neighbour.s_1;
+		interpolated.s_2 += weight * neighbour.s_2;
+	}
 
-// 	nextPsi->values[dualNodeId] = interpolated;
-// }
+	nextPsi->values[dualNodeId] = interpolated;
+}
 //void energy_h(dim3 dimGrid, dim3 dimBlock, double* energyPtr, PitchedPtr psi, PitchedPtr potentials, int4* lapInd, double* hodges, double g, uint3 dimensions, double volume, size_t bodies)
 //{
 //	energy << <dimGrid, dimBlock >> > (energyPtr, psi, potentials, lapInd, hodges, g, dimensions, volume);
@@ -1284,11 +1284,6 @@ uint integrateInTime(const double block_scale, const Vector3& minp, const Vector
 	const size_t dzsize = zsize + 2; // One element buffer to both ends
 	cudaExtent psiExtent = make_cudaExtent(dxsize * sizeof(BlockPsis), dysize, dzsize);
 
-	cudaPitchedPtr d_cudaEvenPsi;
-	cudaPitchedPtr d_cudaOddPsi;
-	checkCudaErrors(cudaMalloc3D(&d_cudaEvenPsi, psiExtent));
-	checkCudaErrors(cudaMalloc3D(&d_cudaOddPsi, psiExtent));
-
 	// static constexpr uint32_t BUFFER_COUNT = 2;
 	// cudaPitchedPtr d_cudaEvenPsis[BUFFER_COUNT];
 	// cudaPitchedPtr d_cudaOddPsis[BUFFER_COUNT];
@@ -1297,6 +1292,10 @@ uint integrateInTime(const double block_scale, const Vector3& minp, const Vector
 	// 	checkCudaErrors(cudaMalloc3D(&d_cudaEvenPsis[i], psiExtent));
 	// 	checkCudaErrors(cudaMalloc3D(&d_cudaOddPsis[i], psiExtent));
 	// }
+	cudaPitchedPtr d_cudaEvenPsi;
+	cudaPitchedPtr d_cudaOddPsi;
+	checkCudaErrors(cudaMalloc3D(&d_cudaEvenPsi, psiExtent));
+	checkCudaErrors(cudaMalloc3D(&d_cudaOddPsi, psiExtent));
 
 	//double* d_energy;
 	double* d_spinNorm;
@@ -1312,7 +1311,6 @@ uint integrateInTime(const double block_scale, const Vector3& minp, const Vector
 	checkCudaErrors(cudaMalloc(&d_u, bodies * sizeof(double3)));
 	checkCudaErrors(cudaMalloc(&d_v, bodies * sizeof(double3)));
 	checkCudaErrors(cudaMalloc(&d_theta, bodies * sizeof(double)));
-
 	// PitchedPtr d_evenPsis[BUFFER_COUNT];
 	// PitchedPtr d_oddPsis[BUFFER_COUNT];
 	// for (int i = 0; i < 2; ++i)
@@ -1655,24 +1653,24 @@ uint integrateInTime(const double block_scale, const Vector3& minp, const Vector
 	std::string mkdirOptions = "-p ";
 #endif
 
-	std::string dirPrefix = "No_Normalization/56Nodes"+ dirSeparator + phaseToString(initPhase) + dirSeparator +
+	std::string dirPrefix = "Normalize/56Nodes"+ dirSeparator + phaseToString(initPhase) + dirSeparator +
 					toStringShort(HOLD_TIME) + "us_winding" + dirSeparator +
 					toString(relativePhase / PI * 180.0, 2) + "_deg_phase" + dirSeparator +
 					getProjectionString() + dirSeparator;
 
 	std::string densDir = dirPrefix; // +"dens";
-	std::string vtksDir = dirPrefix + "dens_vtks";
-	std::string spinorVtksDir = dirPrefix + "spinor_vtks";
+	//std::string vtksDir = dirPrefix + "dens_vtks";
+	//std::string spinorVtksDir = dirPrefix + "spinor_vtks";
 	std::string datsDir = dirPrefix + "dats";
-
+	//
 	std::string createResultsDirCommand = "mkdir " + mkdirOptions + densDir;
-	std::string createVtksDirCommand = "mkdir " + mkdirOptions + vtksDir;
-	std::string createSpinorVtksDirCommand = "mkdir " + mkdirOptions + spinorVtksDir;
+	//std::string createVtksDirCommand = "mkdir " + mkdirOptions + vtksDir;
+	//std::string createSpinorVtksDirCommand = "mkdir " + mkdirOptions + spinorVtksDir;
 	std::string createDatsDirCommand = "mkdir " + mkdirOptions + datsDir;
 	system(createResultsDirCommand.c_str());
-	system(createVtksDirCommand.c_str());
-	system(createSpinorVtksDirCommand.c_str());
-	system(createDatsDirCommand.c_str());
+	//system(createVtksDirCommand.c_str());
+	//system(createSpinorVtksDirCommand.c_str());
+	//system(createDatsDirCommand.c_str());
 
 	double expansionBlockScale = block_scale;
 	double3 expansion_p0 = d_original_p0;
@@ -1741,8 +1739,7 @@ uint integrateInTime(const double block_scale, const Vector3& minp, const Vector
 				const double prevScale = expansionBlockScale;
 				const double3 prev_p0 = expansion_p0;
 
-
-				// calculates expansion scale
+				// calculate expansion scale
 				double k = interpolate_k(t, t_data, k_data);
 				expansionBlockScale += dt / omega_r * 1e3 * k * block_scale;
 				expansion_p0 = compute_p0(expansionBlockScale, xsize, ysize, zsize);
@@ -1751,9 +1748,9 @@ uint integrateInTime(const double block_scale, const Vector3& minp, const Vector
 				// const uint32_t nextBufferIdx = (bufferIdx + 1) % BUFFER_COUNT;
 
 				// scale << <dimGrid, dimBlock >> > (d_evenPsis[nextBufferIdx], d_evenPsis[bufferIdx], d_lapind, d_hodges, dimensions, prev_p0, expansion_p0, prevScale, expansionBlockScale);
-				// normalize_h(dimGrid, dimBlock, d_density, d_evenPsis[nextBufferIdx], dimensions, bodies, volume);
+				normalize_h(dimGrid, dimBlock, d_density, d_evenPsi, dimensions, bodies, volume);
 				// scale << <dimGrid, dimBlock >> > (d_oddPsis[nextBufferIdx], d_oddPsis[bufferIdx], d_lapind, d_hodges, dimensions, prev_p0, expansion_p0, prevScale, expansionBlockScale);
-				// normalize_h(dimGrid, dimBlock, d_density, d_oddPsis[nextBufferIdx], dimensions, bodies, volume);
+				normalize_h(dimGrid, dimBlock, d_density, d_oddPsi, dimensions, bodies, volume);
 
 				// bufferIdx = nextBufferIdx;
 			}
@@ -1772,7 +1769,7 @@ uint integrateInTime(const double block_scale, const Vector3& minp, const Vector
 				const double prevScale = expansionBlockScale;
 				const double3 prev_p0 = expansion_p0;
 
-				// calculates expansion scale
+				// calculate expansion scale
 				double k = interpolate_k(t, t_data, k_data);
 				expansionBlockScale += dt / omega_r * 1e3 * k * block_scale;
 				expansion_p0 = compute_p0(expansionBlockScale, xsize, ysize, zsize);
@@ -1781,9 +1778,9 @@ uint integrateInTime(const double block_scale, const Vector3& minp, const Vector
 				// const uint32_t nextBufferIdx = (bufferIdx + 1) % BUFFER_COUNT;
 
 				// scale << <dimGrid, dimBlock >> > (d_evenPsis[nextBufferIdx], d_evenPsis[bufferIdx], d_lapind, d_hodges, dimensions, prev_p0, expansion_p0, prevScale, expansionBlockScale);
-				// normalize_h(dimGrid, dimBlock, d_density, d_evenPsis[nextBufferIdx], dimensions, bodies, volume);
+				normalize_h(dimGrid, dimBlock, d_density, d_evenPsi, dimensions, bodies, volume);
 				// scale << <dimGrid, dimBlock >> > (d_oddPsis[nextBufferIdx], d_oddPsis[bufferIdx], d_lapind, d_hodges, dimensions, prev_p0, expansion_p0, prevScale, expansionBlockScale);
-				// normalize_h(dimGrid, dimBlock, d_density, d_oddPsis[nextBufferIdx], dimensions, bodies, volume);
+				normalize_h(dimGrid, dimBlock, d_density, d_oddPsi, dimensions, bodies, volume);
 
 				// bufferIdx = nextBufferIdx;
 			}
@@ -1816,10 +1813,11 @@ uint integrateInTime(const double block_scale, const Vector3& minp, const Vector
 
 		//if (t - STATE_PREP_DURATION >= 179)
 		static bool savedState = false;
-		if (t >= END_TIME && !savedState)
+		if (t >= 15.0 && !savedState)
 		{
-			saveVolume(vtksDir, h_oddPsi, bsize, dxsize, dysize, dzsize, expansionBlockScale, expansion_p0, t - STATE_PREP_DURATION);
-			saveSpinor(spinorVtksDir, h_oddPsi, bsize, dxsize, dysize, dzsize, expansionBlockScale, expansion_p0, t - STATE_PREP_DURATION);
+			//
+			saveVolume(vtksDir, h_oddPsi, bsize, dxsize, dysize, dzsize, expansionBlockScale, d_p0, t - STATE_PREP_DURATION);
+			saveSpinor(spinorVtksDir, h_oddPsi, bsize, dxsize, dysize, dzsize, expansionBlockScale, d_p0, t - STATE_PREP_DURATION);
 
 			std::ofstream oddFs(datsDir + "/" + toString(t) + ".dat", std::ios::binary | std::ios_base::trunc);
 			if (oddFs.fail() != 0) return 1;
@@ -1850,8 +1848,8 @@ uint integrateInTime(const double block_scale, const Vector3& minp, const Vector
 	// 	checkCudaErrors(cudaFree(d_cudaEvenPsis[i].ptr));
 	// 	checkCudaErrors(cudaFree(d_cudaOddPsis[i].ptr));
 	// }
-	checkCudaErrors(cudaFree(d_cudaEvenPsi.ptr));
-	checkCudaErrors(cudaFree(d_cudaOddPsi.ptr));
+	checkCudaErrors(cudaFree(d_evenPsi.ptr));
+	checkCudaErrors(cudaFree(d_oddPsi.ptr));
 	checkCudaErrors(cudaFree(d_spinNorm));
 	checkCudaErrors(cudaFree(d_density));
 	checkCudaErrors(cudaFree(d_localAvgSpin));
