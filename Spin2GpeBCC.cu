@@ -13,7 +13,7 @@ enum class Phase {
 	BN_HORI,
 	CYCLIC
 };
-Phase initPhase = Phase::BN_VERT;
+Phase initPhase = Phase::UN;
 
 std::string phaseToString(Phase phase)
 {
@@ -56,7 +56,7 @@ std::string getProjectionString()
 // Experimental field ramps from D.S. Hall (Amherst)
 constexpr double STATE_PREP_DURATION = 0.1;
 constexpr double CREATION_RAMP_DURATION = 0.0177;
-constexpr double HOLD_TIME = 0.25; // 0.5;
+constexpr double HOLD_TIME = 0.5; // 0.5;
 constexpr double HOLD_TIME_EXTRA_DELAY = 0.005;
 constexpr double TOTAL_HOLD_TIME = HOLD_TIME + HOLD_TIME_EXTRA_DELAY;
 constexpr double PROJECTION_RAMP_DURATION = 0.120;
@@ -1047,129 +1047,129 @@ __global__ void scale(PitchedPtr nextStep, PitchedPtr prevStep, const int4* __re
 
 
 // __global__ void interpolate(PitchedPtr nextStep, PitchedPtr prevStep, const int4* __restrict__ laplace, const double* __restrict__ hodges, const uint3 dimensions, const double3 prev_p0, const double3 new_p0, const double prevScale, const double newScale)
-{
-	const size_t xid = blockIdx.x * blockDim.x + threadIdx.x;
-	const size_t yid = blockIdx.y * blockDim.y + threadIdx.y;
-	const size_t zid = blockIdx.z * blockDim.z + threadIdx.z;
-	const size_t dataXid = xid / VALUES_IN_BLOCK; // One thread per every dual node so VALUES_IN_BLOCK threads per mesh block (on x-axis)
-	const size_t dualNodeId = xid % VALUES_IN_BLOCK; // Dual node id. One thread per every dual node so VALUES_IN_BLOCK threads per mesh block (on x-axis)
+// {
+// 	const size_t xid = blockIdx.x * blockDim.x + threadIdx.x;
+// 	const size_t yid = blockIdx.y * blockDim.y + threadIdx.y;
+// 	const size_t zid = blockIdx.z * blockDim.z + threadIdx.z;
+// 	const size_t dataXid = xid / VALUES_IN_BLOCK; // One thread per every dual node so VALUES_IN_BLOCK threads per mesh block (on x-axis)
+// 	const size_t dualNodeId = xid % VALUES_IN_BLOCK; // Dual node id. One thread per every dual node so VALUES_IN_BLOCK threads per mesh block (on x-axis)
 
-	// Exit leftover threads
-	if (dataXid > dimensions.x || yid > dimensions.y || zid > dimensions.z)
-	{
-		return;
-	}
+// 	// Exit leftover threads
+// 	if (dataXid > dimensions.x || yid > dimensions.y || zid > dimensions.z)
+// 	{
+// 		return;
+// 	}
 
-	const size_t localDataXid = threadIdx.x / VALUES_IN_BLOCK;
+// 	const size_t localDataXid = threadIdx.x / VALUES_IN_BLOCK;
 
-	__shared__ BlockPsis ldsPrevPsis[THREAD_BLOCK_Z * THREAD_BLOCK_Y * THREAD_BLOCK_X];
-	const size_t threadIdxInBlock = threadIdx.z * THREAD_BLOCK_Y * THREAD_BLOCK_X + threadIdx.y * THREAD_BLOCK_X + localDataXid;
+// 	__shared__ BlockPsis ldsPrevPsis[THREAD_BLOCK_Z * THREAD_BLOCK_Y * THREAD_BLOCK_X];
+// 	const size_t threadIdxInBlock = threadIdx.z * THREAD_BLOCK_Y * THREAD_BLOCK_X + threadIdx.y * THREAD_BLOCK_X + localDataXid;
 
-	// Calculate the pointers for this block
-	char* prevPsi = prevStep.ptr + prevStep.slicePitch * zid + prevStep.pitch * yid + sizeof(BlockPsis) * dataXid;
-	BlockPsis* nextPsi = (BlockPsis*)(nextStep.ptr + nextStep.slicePitch * zid + nextStep.pitch * yid) + dataXid;
+// 	// Calculate the pointers for this block
+// 	char* prevPsi = prevStep.ptr + prevStep.slicePitch * zid + prevStep.pitch * yid + sizeof(BlockPsis) * dataXid;
+// 	BlockPsis* nextPsi = (BlockPsis*)(nextStep.ptr + nextStep.slicePitch * zid + nextStep.pitch * yid) + dataXid;
 
-	// Update psi
-	const Complex5Vec prev = ((BlockPsis*)prevPsi)->values[dualNodeId];
-	ldsPrevPsis[threadIdxInBlock].values[dualNodeId] = prev;
+// 	// Update psi
+// 	const Complex5Vec prev = ((BlockPsis*)prevPsi)->values[dualNodeId];
+// 	ldsPrevPsis[threadIdxInBlock].values[dualNodeId] = prev;
 
-	// Kill also the leftover edge threads
-	if (dataXid == dimensions.x || yid == dimensions.y || zid == dimensions.z)
-	{
-		return;
-	}
-	__syncthreads();
+// 	// Kill also the leftover edge threads
+// 	if (dataXid == dimensions.x || yid == dimensions.y || zid == dimensions.z)
+// 	{
+// 		return;
+// 	}
+// 	__syncthreads();
 
-	uint primaryFace = dualNodeId * FACE_COUNT;
+// 	uint primaryFace = dualNodeId * FACE_COUNT;
 
-	double3 prevPositions[FACE_COUNT + 1];
-	Complex5Vec prevPsis[FACE_COUNT + 1];
+// 	double3 prevPositions[FACE_COUNT + 1];
+// 	Complex5Vec prevPsis[FACE_COUNT + 1];
 
-	// Add the Laplacian to the Hamiltonian
-#pragma unroll
-	for (int i = 0; i < FACE_COUNT; ++i)
-	{
-		const int4 laplacian = laplace[primaryFace];
+// 	// Add the Laplacian to the Hamiltonian
+// #pragma unroll
+// 	for (int i = 0; i < FACE_COUNT; ++i)
+// 	{
+// 		const int4 laplacian = laplace[primaryFace];
 
-		int neighbourGlobalX = dataXid + laplacian.x;
-		int neighbourGlobalY = yid + laplacian.y;
-		int neighbourGlobalZ = zid + laplacian.z;
+// 		int neighbourGlobalX = dataXid + laplacian.x;
+// 		int neighbourGlobalY = yid + laplacian.y;
+// 		int neighbourGlobalZ = zid + laplacian.z;
 
-		prevPositions[i] = getGlobalPos(neighbourGlobalX, neighbourGlobalY, neighbourGlobalZ, laplacian.w, prevScale, prev_p0);
+// 		prevPositions[i] = getGlobalPos(neighbourGlobalX, neighbourGlobalY, neighbourGlobalZ, laplacian.w, prevScale, prev_p0);
 
-		const int neighbourThreadX = localDataXid + laplacian.x;
-		const int neighbourThreadY = threadIdx.y + laplacian.y;
-		const int neighbourThreadZ = threadIdx.z + laplacian.z;
+// 		const int neighbourThreadX = localDataXid + laplacian.x;
+// 		const int neighbourThreadY = threadIdx.y + laplacian.y;
+// 		const int neighbourThreadZ = threadIdx.z + laplacian.z;
 
-		Complex5Vec otherBoundaryZeroCell;
-		// Read from the local shared memory
-		if ((0 <= neighbourThreadX) && (neighbourThreadX < THREAD_BLOCK_X) &&
-			(0 <= neighbourThreadY) && (neighbourThreadY < THREAD_BLOCK_Y) &&
-			(0 <= neighbourThreadZ) && (neighbourThreadZ < THREAD_BLOCK_Z))
-		{
-			const int neighbourIdx = neighbourThreadZ * THREAD_BLOCK_Y * THREAD_BLOCK_X + neighbourThreadY * THREAD_BLOCK_X + neighbourThreadX;
-			otherBoundaryZeroCell = ldsPrevPsis[neighbourIdx].values[laplacian.w];
-		}
-		else // Read from the global memory
-		{
-			const int offset = laplacian.z * prevStep.slicePitch + laplacian.y * prevStep.pitch + laplacian.x * sizeof(BlockPsis);
-			otherBoundaryZeroCell = ((BlockPsis*)(prevPsi + offset))->values[laplacian.w];
-		}
+// 		Complex5Vec otherBoundaryZeroCell;
+// 		// Read from the local shared memory
+// 		if ((0 <= neighbourThreadX) && (neighbourThreadX < THREAD_BLOCK_X) &&
+// 			(0 <= neighbourThreadY) && (neighbourThreadY < THREAD_BLOCK_Y) &&
+// 			(0 <= neighbourThreadZ) && (neighbourThreadZ < THREAD_BLOCK_Z))
+// 		{
+// 			const int neighbourIdx = neighbourThreadZ * THREAD_BLOCK_Y * THREAD_BLOCK_X + neighbourThreadY * THREAD_BLOCK_X + neighbourThreadX;
+// 			otherBoundaryZeroCell = ldsPrevPsis[neighbourIdx].values[laplacian.w];
+// 		}
+// 		else // Read from the global memory
+// 		{
+// 			const int offset = laplacian.z * prevStep.slicePitch + laplacian.y * prevStep.pitch + laplacian.x * sizeof(BlockPsis);
+// 			otherBoundaryZeroCell = ((BlockPsis*)(prevPsi + offset))->values[laplacian.w];
+// 		}
 
-		prevPsis[i] = otherBoundaryZeroCell;
+// 		prevPsis[i] = otherBoundaryZeroCell;
 
-		primaryFace++;
-	}
+// 		primaryFace++;
+// 	}
 
-	double3 prevPos = getGlobalPos(dataXid, yid, zid, dualNodeId, prevScale, prev_p0);
-	prevPositions[FACE_COUNT] = prevPos;
-	prevPsis[FACE_COUNT] = prev;
+// 	double3 prevPos = getGlobalPos(dataXid, yid, zid, dualNodeId, prevScale, prev_p0);
+// 	prevPositions[FACE_COUNT] = prevPos;
+// 	prevPsis[FACE_COUNT] = prev;
 
-	double3 newPos = getGlobalPos(dataXid, yid, zid, dualNodeId, newScale, new_p0);
+// 	double3 newPos = getGlobalPos(dataXid, yid, zid, dualNodeId, newScale, new_p0);
 
-	double maxDist = 0;
-	int argMax = 0;
-	for (int i = 0; i < FACE_COUNT + 1; ++i)
-	{
-		double dist = mag(newPos - prevPositions[i]);
-		if (dist > maxDist)
-		{
-			maxDist = dist;
-			argMax = i;
-		}
-	}
+// 	double maxDist = 0;
+// 	int argMax = 0;
+// 	for (int i = 0; i < FACE_COUNT + 1; ++i)
+// 	{
+// 		double dist = mag(newPos - prevPositions[i]);
+// 		if (dist > maxDist)
+// 		{
+// 			maxDist = dist;
+// 			argMax = i;
+// 		}
+// 	}
 
-	int closestIndices[FACE_COUNT];
-	int count = 0;
-	for (int i = 0; i < FACE_COUNT + 1; ++i)
-	{
-		if (i != argMax)
-		{
-			closestIndices[count] = i;
-			count++;
-		}
-	}
+// 	int closestIndices[FACE_COUNT];
+// 	int count = 0;
+// 	for (int i = 0; i < FACE_COUNT + 1; ++i)
+// 	{
+// 		if (i != argMax)
+// 		{
+// 			closestIndices[count] = i;
+// 			count++;
+// 		}
+// 	}
 
-	double4 weights = baryCoords(prevPositions[closestIndices[0]],
-								 prevPositions[closestIndices[1]],
-								 prevPositions[closestIndices[2]],
-								 prevPositions[closestIndices[3]],
-								 newPos);
+// 	double4 weights = baryCoords(prevPositions[closestIndices[0]],
+// 								 prevPositions[closestIndices[1]],
+// 								 prevPositions[closestIndices[2]],
+// 								 prevPositions[closestIndices[3]],
+// 								 newPos);
 
-	Complex5Vec interpolated;
-	for (int i = 0; i < FACE_COUNT; ++i)
-	{
-		auto neighbour = prevPsis[closestIndices[i]];
-		auto weight = subscript(weights, i);
-		interpolated.s2 += weight * neighbour.s2;
-		interpolated.s1 += weight * neighbour.s1;
-		interpolated.s0 += weight * neighbour.s0;
-		interpolated.s_1 += weight * neighbour.s_1;
-		interpolated.s_2 += weight * neighbour.s_2;
-	}
+// 	Complex5Vec interpolated;
+// 	for (int i = 0; i < FACE_COUNT; ++i)
+// 	{
+// 		auto neighbour = prevPsis[closestIndices[i]];
+// 		auto weight = subscript(weights, i);
+// 		interpolated.s2 += weight * neighbour.s2;
+// 		interpolated.s1 += weight * neighbour.s1;
+// 		interpolated.s0 += weight * neighbour.s0;
+// 		interpolated.s_1 += weight * neighbour.s_1;
+// 		interpolated.s_2 += weight * neighbour.s_2;
+// 	}
 
-	nextPsi->values[dualNodeId] = interpolated;
-}
+// 	nextPsi->values[dualNodeId] = interpolated;
+// }
 //void energy_h(dim3 dimGrid, dim3 dimBlock, double* energyPtr, PitchedPtr psi, PitchedPtr potentials, int4* lapInd, double* hodges, double g, uint3 dimensions, double volume, size_t bodies)
 //{
 //	energy << <dimGrid, dimBlock >> > (energyPtr, psi, potentials, lapInd, hodges, g, dimensions, volume);
@@ -1655,7 +1655,7 @@ uint integrateInTime(const double block_scale, const Vector3& minp, const Vector
 	std::string mkdirOptions = "-p ";
 #endif
 
-	std::string dirPrefix = "56Nodes"+ dirSeparator + phaseToString(initPhase) + dirSeparator +
+	std::string dirPrefix = "No_Normalization/56Nodes"+ dirSeparator + phaseToString(initPhase) + dirSeparator +
 					toStringShort(HOLD_TIME) + "us_winding" + dirSeparator +
 					toString(relativePhase / PI * 180.0, 2) + "_deg_phase" + dirSeparator +
 					getProjectionString() + dirSeparator;
@@ -1762,7 +1762,7 @@ uint integrateInTime(const double block_scale, const Vector3& minp, const Vector
 			Bs.Bb = BzScale * signal.Bb;
 			Bs.BqQuad = BqQuadScale * signal.Bq;
 			Bs.BbQuad = BzQuadScale * signal.Bb;
-			leapfrog << <dimGrid, dimBlock >> > (d_oddPsis, d_evenPsis, d_lapind, d_hodges, Bs, dimensions, expansionBlockScale, expansion_p0, c0, c2, c4, alpha, t);
+			leapfrog << <dimGrid, dimBlock >> > (d_oddPsi, d_evenPsi, d_lapind, d_hodges, Bs, dimensions, expansionBlockScale, expansion_p0, c0, c2, c4, alpha, t);
 
 			// update even values
 			t += dt / omega_r * 1e3; // [ms]
