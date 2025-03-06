@@ -1646,7 +1646,7 @@ uint integrateInTime(const double block_scale, const Vector3& minp, const Vector
 	std::string mkdirOptions = "-p ";
 #endif
 
-	std::string dirPrefix = "Nobuffer"+ dirSeparator + phaseToString(initPhase) + dirSeparator +
+	std::string dirPrefix = "TestNorm"+ dirSeparator + phaseToString(initPhase) + dirSeparator +
 					toStringShort(HOLD_TIME) + "us_winding" + dirSeparator +
 					toString(relativePhase / PI * 180.0, 2) + "_deg_phase" + dirSeparator +
 					getProjectionString() + dirSeparator;
@@ -1728,7 +1728,6 @@ uint integrateInTime(const double block_scale, const Vector3& minp, const Vector
 			t += dt / omega_r * 1e3; // [ms]
 			if (t >= GRID_SCALING_START)
 			{
-				// last_scaling_t = t;
 				const double prevScale = expansionBlockScale;
 				const double3 prev_p0 = expansion_p0;
 
@@ -1738,14 +1737,9 @@ uint integrateInTime(const double block_scale, const Vector3& minp, const Vector
 				expansion_p0 = compute_p0(expansionBlockScale, xsize, ysize, zsize);
 				volume = expansionBlockScale * expansionBlockScale * expansionBlockScale * VOLUME;
 
-				// const uint32_t nextBufferIdx = (bufferIdx + 1) % BUFFER_COUNT;
+				// normalize_h(dimGrid, dimBlock, d_density, d_evenPsi, dimensions, bodies, volume);
+				// normalize_h(dimGrid, dimBlock, d_density, d_oddPsi, dimensions, bodies, volume);
 
-				// scale << <dimGrid, dimBlock >> > (d_evenPsis[nextBufferIdx], d_evenPsis[bufferIdx], d_lapind, d_hodges, dimensions, prev_p0, expansion_p0, prevScale, expansionBlockScale);
-				// normalize_h(dimGrid, dimBlock, d_density, d_evenPsis[nextBufferIdx], dimensions, bodies, volume);
-				// scale << <dimGrid, dimBlock >> > (d_oddPsis[nextBufferIdx], d_oddPsis[bufferIdx], d_lapind, d_hodges, dimensions, prev_p0, expansion_p0, prevScale, expansionBlockScale);
-				// normalize_h(dimGrid, dimBlock, d_density, d_oddPsis[nextBufferIdx], dimensions, bodies, volume);
-
-				// bufferIdx = nextBufferIdx;
 			}
 			signal = getSignal(t);
 			Bs.Bq = BqScale * signal.Bq;
@@ -1758,7 +1752,6 @@ uint integrateInTime(const double block_scale, const Vector3& minp, const Vector
 			t += dt / omega_r * 1e3; // [ms]
 			if (t >= GRID_SCALING_START)
 			{
-				// last_scaling_t = t;
 				const double prevScale = expansionBlockScale;
 				const double3 prev_p0 = expansion_p0;
 
@@ -1768,14 +1761,9 @@ uint integrateInTime(const double block_scale, const Vector3& minp, const Vector
 				expansion_p0 = compute_p0(expansionBlockScale, xsize, ysize, zsize);
 				volume = expansionBlockScale * expansionBlockScale * expansionBlockScale * VOLUME;
 
-				// const uint32_t nextBufferIdx = (bufferIdx + 1) % BUFFER_COUNT;
-
-				// scale << <dimGrid, dimBlock >> > (d_evenPsis[nextBufferIdx], d_evenPsis[bufferIdx], d_lapind, d_hodges, dimensions, prev_p0, expansion_p0, prevScale, expansionBlockScale);
 				normalize_h(dimGrid, dimBlock, d_density, d_evenPsi, dimensions, bodies, volume);
-				// scale << <dimGrid, dimBlock >> > (d_oddPsis[nextBufferIdx], d_oddPsis[bufferIdx], d_lapind, d_hodges, dimensions, prev_p0, expansion_p0, prevScale, expansionBlockScale);
 				normalize_h(dimGrid, dimBlock, d_density, d_oddPsi, dimensions, bodies, volume);
 
-				// bufferIdx = nextBufferIdx;
 			}
 			signal = getSignal(t);
 			Bs.Bq = BqScale * signal.Bq;
@@ -1808,8 +1796,8 @@ uint integrateInTime(const double block_scale, const Vector3& minp, const Vector
 		static bool savedState = false;
 		if (t >= 15.0 && !savedState)
 		{
-			//saveVolume(vtksDir, h_oddPsi, bsize, dxsize, dysize, dzsize, expansionBlockScale, d_p0, t - STATE_PREP_DURATION);
-			//saveSpinor(spinorVtksDir, h_oddPsi, bsize, dxsize, dysize, dzsize, expansionBlockScale, d_p0, t - STATE_PREP_DURATION);
+			saveVolume(vtksDir, h_oddPsi, bsize, dxsize, dysize, dzsize, expansionBlockScale, d_p0, t - STATE_PREP_DURATION);
+			saveSpinor(spinorVtksDir, h_oddPsi, bsize, dxsize, dysize, dzsize, expansionBlockScale, d_p0, t - STATE_PREP_DURATION);
 
 			std::ofstream oddFs(datsDir + "/" + toString(t) + ".dat", std::ios::binary | std::ios_base::trunc);
 			if (oddFs.fail() != 0) return 1;
@@ -1834,12 +1822,6 @@ uint integrateInTime(const double block_scale, const Vector3& minp, const Vector
 		fprintf(stderr, "Failed to launch kernels (error code %s)!\n", cudaGetErrorString(err));
 		exit(EXIT_FAILURE);
 	}
-
-	// for (int i = 0; i < BUFFER_COUNT; ++i)
-	// {
-	// 	checkCudaErrors(cudaFree(d_cudaEvenPsis[i].ptr));
-	// 	checkCudaErrors(cudaFree(d_cudaOddPsis[i].ptr));
-	// }
 	checkCudaErrors(cudaFree(d_cudaEvenPsi.ptr));
 	checkCudaErrors(cudaFree(d_cudaOddPsi.ptr));
 	checkCudaErrors(cudaFree(d_spinNorm));
