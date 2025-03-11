@@ -64,7 +64,8 @@ constexpr double OPT_TRAP_OFF_DELAY = 0.020;
 constexpr double OPT_TRAP_OFF = STATE_PREP_DURATION + CREATION_RAMP_DURATION + TOTAL_HOLD_TIME + OPT_TRAP_OFF_DELAY; // When the expansion starts in ms
 constexpr double GRADIENT_OFF_DELAY = 0.010;
 constexpr double GRADIENT_OFF_DUARATION = 0.034;
-constexpr double GRID_SCALING_START = 1.0; // ms
+constexpr double GRID_SCALING_START = 24; // ms
+// const double SCALING_INTERVAL = 1e-5;
 
 //#include "AliceRingRamps.h"
 #include "KnotRamps.h"
@@ -81,6 +82,10 @@ constexpr double GRID_SCALING_START = 1.0; // ms
 
 #include "mesh.h"
 
+#include "calculate_k.h"
+std::vector<double> t_data;
+std::vector<double> k_data;
+
 #define COMPUTE_GROUND_STATE 0
 #define GROUND_STATE_ITERATION_COUNT 10000
 
@@ -88,7 +93,7 @@ constexpr double GRID_SCALING_START = 1.0; // ms
 #define USE_QUADRUPOLE_OFFSET 0
 #define USE_INITIAL_NOISE 0
 
-#define SAVE_STATES 0
+#define SAVE_STATES 1
 #define SAVE_PICTURE 1
 
 #define THREAD_BLOCK_X 16
@@ -99,17 +104,17 @@ constexpr double DOMAIN_SIZE_X = 20.0; //24.0;
 constexpr double DOMAIN_SIZE_Y = 20.0; //24.0;
 constexpr double DOMAIN_SIZE_Z = 20.0; //24.0;
 
-constexpr double REPLICABLE_STRUCTURE_COUNT_X = 112.0;
+constexpr double REPLICABLE_STRUCTURE_COUNT_X =112.0;
 //constexpr double REPLICABLE_STRUCTURE_COUNT_Y = 112.0;
 //constexpr double REPLICABLE_STRUCTURE_COUNT_Z = 112.0;
 
 //constexpr double k = 0.7569772335291065; // Grid upscale speed for expansion (from QCD code)
-constexpr double k = 1.0; // Grid upscale speed for expansion (from own experiments)
+// constexpr double k = 1.0; // Grid upscale speed for expansion (from own experiments)
 
 constexpr double N = 2e5; // Number of atoms in the condensate
 
-constexpr double trapFreq_r = 126;
-constexpr double trapFreq_z = 166;
+constexpr double trapFreq_r = 126; //126 136.22 for equal
+constexpr double trapFreq_z = 166; //166
 
 constexpr double omega_r = trapFreq_r * 2 * PI;
 constexpr double omega_z = trapFreq_z * 2 * PI;
@@ -155,17 +160,18 @@ std::string toStringShort(const double value)
 };
 
 const std::string GROUND_STATE_FILENAME = "ground_state_psi_" + toStringShort(DOMAIN_SIZE_X) + "_" + toStringShort(REPLICABLE_STRUCTURE_COUNT_X) + ".dat";
-constexpr double NOISE_AMPLITUDE = 0; //0.1;
+constexpr double NOISE_AMPLITUDE = 0.1; //0.1;
 
 //constexpr double dt = 1e-4; // 1 x // Before the monopole creation ramp (0 - 200 ms)
 constexpr double dt = 1e-5; // 0.1 x // During and after the monopole creation ramp (200 ms - )
 
-const double IMAGE_SAVE_INTERVAL = 1.0; // ms
+const double IMAGE_SAVE_INTERVAL = 0.5; // ms
 const uint IMAGE_SAVE_FREQUENCY = uint(IMAGE_SAVE_INTERVAL * 0.5 / 1e3 * omega_r / dt) + 1;
 
 const uint STATE_SAVE_INTERVAL = 10.0; // ms
 
 double t = 0; // Start time in ms
+double last_scaling_t = GRID_SCALING_START;
 constexpr double END_TIME = OPT_TRAP_OFF + GRADIENT_OFF_DELAY + GRADIENT_OFF_DUARATION + 24.0; // End time in ms
 
 double relativePhase = 0; // 5.105088062083414; // In radians
@@ -815,6 +821,7 @@ __global__ void forwardEuler(PitchedPtr nextStep, PitchedPtr prevStep, int4* __r
 	double2 c45 = denominator - 0.4 * c4 * prev.s2 * conj(prev.s1);
 	double2 c13 = 0.2 * c4 * prev.s0 * conj(prev.s_2);
 	double2 c35 = 0.2 * c4 * prev.s2 * conj(prev.s0);
+
 	double2 c23 = sqrt(1.5) * denominator - 0.2 * c4 * prev.s0 * conj(prev.s_1);
 	double2 c34 = sqrt(1.5) * denominator - 0.2 * c4 * prev.s1 * conj(prev.s0);
 
@@ -962,6 +969,8 @@ __global__ void leapfrog(PitchedPtr nextStep, PitchedPtr prevStep, const int4* _
 	double2 c45 = denominator - 0.4 * c4 * prev.s2 * conj(prev.s1);
 	double2 c13 = 0.2 * c4 * prev.s0 * conj(prev.s_2);
 	double2 c35 = 0.2 * c4 * prev.s2 * conj(prev.s0);
+	// double2 c13 = {0.0, 0.0};
+	// double2 c35 = {0.0, 0.0};
 	double2 c23 = sqrt(1.5) * denominator - 0.2 * c4 * prev.s0 * conj(prev.s_1);
 	double2 c34 = sqrt(1.5) * denominator - 0.2 * c4 * prev.s1 * conj(prev.s0);
 
@@ -1000,7 +1009,7 @@ __device__ 	double3 getGlobalPos(int blockX, int blockY, int blockZ, int cellIdx
 			 p0.z + blockScale * (blockZ * BLOCK_WIDTH_Z + local.z) };
 };
 
-__global__ void interpolate(PitchedPtr nextStep, PitchedPtr prevStep, const int4* __restrict__ laplace, const double* __restrict__ hodges, const uint3 dimensions, const double3 prev_p0, const double3 new_p0, const double prevScale, const double newScale)
+__global__ void scale(PitchedPtr nextStep, PitchedPtr prevStep, const int4* __restrict__ laplace, const double* __restrict__ hodges, const uint3 dimensions, const double3 prev_p0, const double3 new_p0, const double prevScale, const double newScale)
 {
 	const size_t xid = blockIdx.x * blockDim.x + threadIdx.x;
 	const size_t yid = blockIdx.y * blockDim.y + threadIdx.y;
@@ -1025,7 +1034,6 @@ __global__ void interpolate(PitchedPtr nextStep, PitchedPtr prevStep, const int4
 
 	// Update psi
 	const Complex5Vec prev = ((BlockPsis*)prevPsi)->values[dualNodeId];
-	ldsPrevPsis[threadIdxInBlock].values[dualNodeId] = prev;
 
 	// Kill also the leftover edge threads
 	if (dataXid == dimensions.x || yid == dimensions.y || zid == dimensions.z)
@@ -1034,96 +1042,137 @@ __global__ void interpolate(PitchedPtr nextStep, PitchedPtr prevStep, const int4
 	}
 	__syncthreads();
 
-	uint primaryFace = dualNodeId * FACE_COUNT;
-
-	double3 prevPositions[FACE_COUNT + 1];
-	Complex5Vec prevPsis[FACE_COUNT + 1];
-
-	// Add the Laplacian to the Hamiltonian
-#pragma unroll
-	for (int i = 0; i < FACE_COUNT; ++i)
-	{
-		const int4 laplacian = laplace[primaryFace];
-
-		int neighbourGlobalX = dataXid + laplacian.x;
-		int neighbourGlobalY = yid + laplacian.y;
-		int neighbourGlobalZ = zid + laplacian.z;
-
-		prevPositions[i] = getGlobalPos(neighbourGlobalX, neighbourGlobalY, neighbourGlobalZ, laplacian.w, prevScale, prev_p0);
-
-		const int neighbourThreadX = localDataXid + laplacian.x;
-		const int neighbourThreadY = threadIdx.y + laplacian.y;
-		const int neighbourThreadZ = threadIdx.z + laplacian.z;
-
-		Complex5Vec otherBoundaryZeroCell;
-		// Read from the local shared memory
-		if ((0 <= neighbourThreadX) && (neighbourThreadX < THREAD_BLOCK_X) &&
-			(0 <= neighbourThreadY) && (neighbourThreadY < THREAD_BLOCK_Y) &&
-			(0 <= neighbourThreadZ) && (neighbourThreadZ < THREAD_BLOCK_Z))
-		{
-			const int neighbourIdx = neighbourThreadZ * THREAD_BLOCK_Y * THREAD_BLOCK_X + neighbourThreadY * THREAD_BLOCK_X + neighbourThreadX;
-			otherBoundaryZeroCell = ldsPrevPsis[neighbourIdx].values[laplacian.w];
-		}
-		else // Read from the global memory
-		{
-			const int offset = laplacian.z * prevStep.slicePitch + laplacian.y * prevStep.pitch + laplacian.x * sizeof(BlockPsis);
-			otherBoundaryZeroCell = ((BlockPsis*)(prevPsi + offset))->values[laplacian.w];
-		}
-
-		prevPsis[i] = otherBoundaryZeroCell;
-
-		primaryFace++;
-	}
-
 	double3 prevPos = getGlobalPos(dataXid, yid, zid, dualNodeId, prevScale, prev_p0);
-	prevPositions[FACE_COUNT] = prevPos;
-	prevPsis[FACE_COUNT] = prev;
-
 	double3 newPos = getGlobalPos(dataXid, yid, zid, dualNodeId, newScale, new_p0);
 
-	double maxDist = 0;
-	int argMax = 0;
-	for (int i = 0; i < FACE_COUNT + 1; ++i)
-	{
-		double dist = mag(newPos - prevPositions[i]);
-		if (dist > maxDist)
-		{
-			maxDist = dist;
-			argMax = i;
-		}
-	}
-
-	int closestIndices[FACE_COUNT];
-	int count = 0;
-	for (int i = 0; i < FACE_COUNT + 1; ++i)
-	{
-		if (i != argMax)
-		{
-			closestIndices[count] = i;
-			count++;
-		}
-	}
-
-	double4 weights = baryCoords(prevPositions[closestIndices[0]], 
-								 prevPositions[closestIndices[1]],
-								 prevPositions[closestIndices[2]],
-								 prevPositions[closestIndices[3]],
-								 newPos);
-
-	Complex5Vec interpolated;
-	for (int i = 0; i < FACE_COUNT; ++i)
-	{
-		auto neighbour = prevPsis[closestIndices[i]];
-		auto weight = subscript(weights, i);
-		interpolated.s2 += weight * neighbour.s2;
-		interpolated.s1 += weight * neighbour.s1;
-		interpolated.s0 += weight * neighbour.s0;
-		interpolated.s_1 += weight * neighbour.s_1;
-		interpolated.s_2 += weight * neighbour.s_2;
-	}
-
-	nextPsi->values[dualNodeId] = interpolated;
+	nextPsi->values[dualNodeId] = prev;
 }
+
+
+// __global__ void interpolate(PitchedPtr nextStep, PitchedPtr prevStep, const int4* __restrict__ laplace, const double* __restrict__ hodges, const uint3 dimensions, const double3 prev_p0, const double3 new_p0, const double prevScale, const double newScale)
+// {
+// 	const size_t xid = blockIdx.x * blockDim.x + threadIdx.x;
+// 	const size_t yid = blockIdx.y * blockDim.y + threadIdx.y;
+// 	const size_t zid = blockIdx.z * blockDim.z + threadIdx.z;
+// 	const size_t dataXid = xid / VALUES_IN_BLOCK; // One thread per every dual node so VALUES_IN_BLOCK threads per mesh block (on x-axis)
+// 	const size_t dualNodeId = xid % VALUES_IN_BLOCK; // Dual node id. One thread per every dual node so VALUES_IN_BLOCK threads per mesh block (on x-axis)
+
+// 	// Exit leftover threads
+// 	if (dataXid > dimensions.x || yid > dimensions.y || zid > dimensions.z)
+// 	{
+// 		return;
+// 	}
+
+// 	const size_t localDataXid = threadIdx.x / VALUES_IN_BLOCK;
+
+// 	__shared__ BlockPsis ldsPrevPsis[THREAD_BLOCK_Z * THREAD_BLOCK_Y * THREAD_BLOCK_X];
+// 	const size_t threadIdxInBlock = threadIdx.z * THREAD_BLOCK_Y * THREAD_BLOCK_X + threadIdx.y * THREAD_BLOCK_X + localDataXid;
+
+// 	// Calculate the pointers for this block
+// 	char* prevPsi = prevStep.ptr + prevStep.slicePitch * zid + prevStep.pitch * yid + sizeof(BlockPsis) * dataXid;
+// 	BlockPsis* nextPsi = (BlockPsis*)(nextStep.ptr + nextStep.slicePitch * zid + nextStep.pitch * yid) + dataXid;
+
+// 	// Update psi
+// 	const Complex5Vec prev = ((BlockPsis*)prevPsi)->values[dualNodeId];
+// 	ldsPrevPsis[threadIdxInBlock].values[dualNodeId] = prev;
+
+// 	// Kill also the leftover edge threads
+// 	if (dataXid == dimensions.x || yid == dimensions.y || zid == dimensions.z)
+// 	{
+// 		return;
+// 	}
+// 	__syncthreads();
+
+// 	uint primaryFace = dualNodeId * FACE_COUNT;
+
+// 	double3 prevPositions[FACE_COUNT + 1];
+// 	Complex5Vec prevPsis[FACE_COUNT + 1];
+
+// 	// Add the Laplacian to the Hamiltonian
+// #pragma unroll
+// 	for (int i = 0; i < FACE_COUNT; ++i)
+// 	{
+// 		const int4 laplacian = laplace[primaryFace];
+
+// 		int neighbourGlobalX = dataXid + laplacian.x;
+// 		int neighbourGlobalY = yid + laplacian.y;
+// 		int neighbourGlobalZ = zid + laplacian.z;
+
+// 		prevPositions[i] = getGlobalPos(neighbourGlobalX, neighbourGlobalY, neighbourGlobalZ, laplacian.w, prevScale, prev_p0);
+
+// 		const int neighbourThreadX = localDataXid + laplacian.x;
+// 		const int neighbourThreadY = threadIdx.y + laplacian.y;
+// 		const int neighbourThreadZ = threadIdx.z + laplacian.z;
+
+// 		Complex5Vec otherBoundaryZeroCell;
+// 		// Read from the local shared memory
+// 		if ((0 <= neighbourThreadX) && (neighbourThreadX < THREAD_BLOCK_X) &&
+// 			(0 <= neighbourThreadY) && (neighbourThreadY < THREAD_BLOCK_Y) &&
+// 			(0 <= neighbourThreadZ) && (neighbourThreadZ < THREAD_BLOCK_Z))
+// 		{
+// 			const int neighbourIdx = neighbourThreadZ * THREAD_BLOCK_Y * THREAD_BLOCK_X + neighbourThreadY * THREAD_BLOCK_X + neighbourThreadX;
+// 			otherBoundaryZeroCell = ldsPrevPsis[neighbourIdx].values[laplacian.w];
+// 		}
+// 		else // Read from the global memory
+// 		{
+// 			const int offset = laplacian.z * prevStep.slicePitch + laplacian.y * prevStep.pitch + laplacian.x * sizeof(BlockPsis);
+// 			otherBoundaryZeroCell = ((BlockPsis*)(prevPsi + offset))->values[laplacian.w];
+// 		}
+
+// 		prevPsis[i] = otherBoundaryZeroCell;
+
+// 		primaryFace++;
+// 	}
+
+// 	double3 prevPos = getGlobalPos(dataXid, yid, zid, dualNodeId, prevScale, prev_p0);
+// 	prevPositions[FACE_COUNT] = prevPos;
+// 	prevPsis[FACE_COUNT] = prev;
+
+// 	double3 newPos = getGlobalPos(dataXid, yid, zid, dualNodeId, newScale, new_p0);
+
+// 	double maxDist = 0;
+// 	int argMax = 0;
+// 	for (int i = 0; i < FACE_COUNT + 1; ++i)
+// 	{
+// 		double dist = mag(newPos - prevPositions[i]);
+// 		if (dist > maxDist)
+// 		{
+// 			maxDist = dist;
+// 			argMax = i;
+// 		}
+// 	}
+
+// 	int closestIndices[FACE_COUNT];
+// 	int count = 0;
+// 	for (int i = 0; i < FACE_COUNT + 1; ++i)
+// 	{
+// 		if (i != argMax)
+// 		{
+// 			closestIndices[count] = i;
+// 			count++;
+// 		}
+// 	}
+
+// 	double4 weights = baryCoords(prevPositions[closestIndices[0]],
+// 								 prevPositions[closestIndices[1]],
+// 								 prevPositions[closestIndices[2]],
+// 								 prevPositions[closestIndices[3]],
+// 								 newPos);
+
+// 	Complex5Vec interpolated;
+// 	for (int i = 0; i < FACE_COUNT; ++i)
+// 	{
+// 		auto neighbour = prevPsis[closestIndices[i]];
+// 		auto weight = subscript(weights, i);
+// 		interpolated.s2 += weight * neighbour.s2;
+// 		interpolated.s1 += weight * neighbour.s1;
+// 		interpolated.s0 += weight * neighbour.s0;
+// 		interpolated.s_1 += weight * neighbour.s_1;
+// 		interpolated.s_2 += weight * neighbour.s_2;
+// 	}
+
+// 	nextPsi->values[dualNodeId] = interpolated;
+// }
 //void energy_h(dim3 dimGrid, dim3 dimBlock, double* energyPtr, PitchedPtr psi, PitchedPtr potentials, int4* lapInd, double* hodges, double g, uint3 dimensions, double volume, size_t bodies)
 //{
 //	energy << <dimGrid, dimBlock >> > (energyPtr, psi, potentials, lapInd, hodges, g, dimensions, volume);
@@ -1238,14 +1287,18 @@ uint integrateInTime(const double block_scale, const Vector3& minp, const Vector
 	const size_t dzsize = zsize + 2; // One element buffer to both ends
 	cudaExtent psiExtent = make_cudaExtent(dxsize * sizeof(BlockPsis), dysize, dzsize);
 
-	static constexpr uint32_t BUFFER_COUNT = 2;
-	cudaPitchedPtr d_cudaEvenPsis[BUFFER_COUNT];
-	cudaPitchedPtr d_cudaOddPsis[BUFFER_COUNT];
-	for (int i = 0; i < 2; ++i)
-	{
-		checkCudaErrors(cudaMalloc3D(&d_cudaEvenPsis[i], psiExtent));
-		checkCudaErrors(cudaMalloc3D(&d_cudaOddPsis[i], psiExtent));
-	}
+	// static constexpr uint32_t BUFFER_COUNT = 2;
+	// cudaPitchedPtr d_cudaEvenPsis[BUFFER_COUNT];
+	// cudaPitchedPtr d_cudaOddPsis[BUFFER_COUNT];
+	// for (int i = 0; i < 2; ++i)
+	// {
+	// 	checkCudaErrors(cudaMalloc3D(&d_cudaEvenPsis[i], psiExtent));
+	// 	checkCudaErrors(cudaMalloc3D(&d_cudaOddPsis[i], psiExtent));
+	// }
+	cudaPitchedPtr d_cudaEvenPsi;
+	cudaPitchedPtr d_cudaOddPsi;
+	checkCudaErrors(cudaMalloc3D(&d_cudaEvenPsi, psiExtent));
+	checkCudaErrors(cudaMalloc3D(&d_cudaOddPsi, psiExtent));
 
 	//double* d_energy;
 	double* d_spinNorm;
@@ -1261,18 +1314,15 @@ uint integrateInTime(const double block_scale, const Vector3& minp, const Vector
 	checkCudaErrors(cudaMalloc(&d_u, bodies * sizeof(double3)));
 	checkCudaErrors(cudaMalloc(&d_v, bodies * sizeof(double3)));
 	checkCudaErrors(cudaMalloc(&d_theta, bodies * sizeof(double)));
-	PitchedPtr d_evenPsis[BUFFER_COUNT];
-	PitchedPtr d_oddPsis[BUFFER_COUNT];
-	for (int i = 0; i < 2; ++i)
-	{
-		size_t offset = d_cudaEvenPsis[i].pitch * dysize + d_cudaEvenPsis[i].pitch + sizeof(BlockPsis);
-		d_evenPsis[i] = { (char*)d_cudaEvenPsis[i].ptr + offset, d_cudaEvenPsis[i].pitch, d_cudaEvenPsis[i].pitch * dysize };
-		d_oddPsis[i]= { (char*)d_cudaOddPsis[i].ptr + offset, d_cudaOddPsis[i].pitch, d_cudaOddPsis[i].pitch * dysize };
-	}
+
+	size_t offset = d_cudaEvenPsi.pitch * dysize + d_cudaEvenPsi.pitch + sizeof(BlockPsis);
+	PitchedPtr d_evenPsi = { (char*)d_cudaEvenPsi.ptr + offset, d_cudaEvenPsi.pitch, d_cudaEvenPsi.pitch * dysize };
+	PitchedPtr d_oddPsi = { (char*)d_cudaOddPsi.ptr + offset, d_cudaOddPsi.pitch, d_cudaOddPsi.pitch * dysize };
+
 	// find terms for laplacian
 	Buffer<int4> lapind;
 	Buffer<double> hodges;
-	getLaplacian(lapind, hodges, sizeof(BlockPsis), d_evenPsis[0].pitch, d_evenPsis[0].slicePitch);
+	getLaplacian(lapind, hodges, sizeof(BlockPsis), d_evenPsi.pitch, d_evenPsi.slicePitch);
 
 	//std::cout << "lapsize = " << lapsize << ", lapfac = " << lapfac << ", lapfac0 = " << lapfac0 << std::endl;
 
@@ -1414,25 +1464,25 @@ uint integrateInTime(const double block_scale, const Vector3& minp, const Vector
 
 	h_cudaEvenPsi.ptr = h_evenPsi;
 	h_cudaEvenPsi.pitch = dxsize * sizeof(BlockPsis);
-	h_cudaEvenPsi.xsize = d_cudaEvenPsis[0].xsize;
-	h_cudaEvenPsi.ysize = d_cudaEvenPsis[0].ysize;
+	h_cudaEvenPsi.xsize = d_cudaEvenPsi.xsize;
+	h_cudaEvenPsi.ysize = d_cudaEvenPsi.ysize;
 
 	h_cudaOddPsi.ptr = h_oddPsi;
 	h_cudaOddPsi.pitch = dxsize * sizeof(BlockPsis);
-	h_cudaOddPsi.xsize = d_cudaOddPsis[0].xsize;
-	h_cudaOddPsi.ysize = d_cudaOddPsis[0].ysize;
+	h_cudaOddPsi.xsize = d_cudaOddPsi.xsize;
+	h_cudaOddPsi.ysize = d_cudaOddPsi.ysize;
 
 	// Copy from host memory to device memory
 	cudaMemcpy3DParms evenPsiParams = { 0 };
 	cudaMemcpy3DParms oddPsiParams = { 0 };
 
 	evenPsiParams.srcPtr = h_cudaEvenPsi;
-	evenPsiParams.dstPtr = d_cudaEvenPsis[0];
+	evenPsiParams.dstPtr = d_cudaEvenPsi;
 	evenPsiParams.extent = psiExtent;
 	evenPsiParams.kind = cudaMemcpyHostToDevice;
 
 	oddPsiParams.srcPtr = h_cudaOddPsi;
-	oddPsiParams.dstPtr = d_cudaOddPsis[0];
+	oddPsiParams.dstPtr = d_cudaOddPsi;
 	oddPsiParams.extent = psiExtent;
 	oddPsiParams.kind = cudaMemcpyHostToDevice;
 
@@ -1450,13 +1500,13 @@ uint integrateInTime(const double block_scale, const Vector3& minp, const Vector
 	cudaFreeHost(h_oddPsi);
 #endif
 	cudaMemcpy3DParms evenPsiBackParams = { 0 };
-	evenPsiBackParams.srcPtr = d_cudaEvenPsis[0];
+	evenPsiBackParams.srcPtr = d_cudaEvenPsi;
 	evenPsiBackParams.dstPtr = h_cudaEvenPsi;
 	evenPsiBackParams.extent = psiExtent;
 	evenPsiBackParams.kind = cudaMemcpyDeviceToHost;
 
 	cudaMemcpy3DParms oddPsiBackParams = { 0 };
-	oddPsiBackParams.srcPtr = d_cudaOddPsis[0];
+	oddPsiBackParams.srcPtr = d_cudaOddPsi;
 	oddPsiBackParams.dstPtr = h_cudaOddPsi;
 	oddPsiBackParams.extent = psiExtent;
 	oddPsiBackParams.kind = cudaMemcpyDeviceToHost;
@@ -1479,26 +1529,26 @@ uint integrateInTime(const double block_scale, const Vector3& minp, const Vector
 		{
 		case Phase::UN:
 			std::cout << "Transform ground state to uniaxial nematic phase." << std::endl;
-			unState << <dimGrid, dimBlock >> > (d_oddPsis[0], dimensions);
+			unState << <dimGrid, dimBlock >> > (d_oddPsi, dimensions);
 			break;
 		case Phase::BN_VERT:
 			std::cout << "Transform ground state to vertically oriented biaxial nematic phase with a phase of " << relativePhase << "." << std::endl;
-			verticalBnState << <dimGrid, dimBlock >> > (d_oddPsis[0], dimensions, relativePhase);
+			verticalBnState << <dimGrid, dimBlock >> > (d_oddPsi, dimensions, relativePhase);
 			break;
 		case Phase::BN_HORI:
 			std::cout << "Transform ground state to horizontally oriented biaxial nematic phase with a phase of " << relativePhase << "." << std::endl;
-			horizontalBnState << <dimGrid, dimBlock >> > (d_oddPsis[0], dimensions, relativePhase);
+			horizontalBnState << <dimGrid, dimBlock >> > (d_oddPsi, dimensions, relativePhase);
 			break;
 		case Phase::CYCLIC:
 			std::cout << "Transform ground state to cyclic phase with a phase of " << relativePhase << "." << std::endl;
-			cyclicState << <dimGrid, dimBlock >> > (d_oddPsis[0], dimensions, relativePhase);
+			cyclicState << <dimGrid, dimBlock >> > (d_oddPsi, dimensions, relativePhase);
 			break;
 		default:
 			std::cout << "Initial phase " << (int)initPhase << " is not supported!";
 			break;
 		}
 
-		std::cout << "Total density: " << getDensity(dimGrid, dimBlock, d_density, d_oddPsis[0], dimensions, bodies, volume) << std::endl;
+		std::cout << "Total density: " << getDensity(dimGrid, dimBlock, d_density, d_oddPsi, dimensions, bodies, volume) << std::endl;
 	}
 
 	// Take one forward Euler step if starting from the ground state or time step changed
@@ -1511,7 +1561,7 @@ uint integrateInTime(const double block_scale, const Vector3& minp, const Vector
 		Bs.Bb = BzScale * signal.Bb;
 		Bs.BqQuad = BqQuadScale * signal.Bq;
 		Bs.BbQuad = BzQuadScale * signal.Bb;
-		forwardEuler << <dimGrid, dimBlock >> > (d_evenPsis[0], d_oddPsis[0], d_lapind, d_hodges, Bs, dimensions, block_scale, d_original_p0, c0, c2, c4, alpha, t);
+		forwardEuler << <dimGrid, dimBlock >> > (d_evenPsi, d_oddPsi, d_lapind, d_hodges, Bs, dimensions, block_scale, d_original_p0, c0, c2, c4, alpha, t);
 	}
 	else
 	{
@@ -1521,7 +1571,7 @@ uint integrateInTime(const double block_scale, const Vector3& minp, const Vector
 #if COMPUTE_GROUND_STATE
 	uint iter = 0;
 
-	normalize_h(dimGrid, dimBlock, d_density, d_evenPsis[0], dimensions, bodies, volume);
+	normalize_h(dimGrid, dimBlock, d_density, d_evenPsi, dimensions, bodies, volume);
 
 	while (true)
 	{
@@ -1534,7 +1584,7 @@ uint integrateInTime(const double block_scale, const Vector3& minp, const Vector
 			Bs.Bq = BqScale * signal.Bq;
 			Bs.Bb = BzScale * signal.Bb;
 			drawIandR("GS", h_evenPsi, dxsize, dysize, dzsize, iter, Bs, d_original_p0, block_scale);
-			std::cout << "Normalized particle count: " << getDensity(dimGrid, dimBlock, d_density, d_evenPsis[0], dimensions, bodies, volume) << std::endl;
+			std::cout << "Normalized particle count: " << getDensity(dimGrid, dimBlock, d_density, d_evenPsi, dimensions, bodies, volume) << std::endl;
 
 			double3 com = centerOfMass(h_evenPsi, bsize, dxsize, dysize, dzsize, block_scale, d_original_p0);
 			std::cout << "Center of mass: " << com.x << ", " << com.y << ", " << com.z << std::endl;
@@ -1550,14 +1600,14 @@ uint integrateInTime(const double block_scale, const Vector3& minp, const Vector
 			return 0;
 		}
 		// Take an imaginary time step
-		itp << <dimGrid, dimBlock >> > (d_oddPsis[0], d_evenPsis[0], d_lapind, d_hodges, {0}, dimensions, block_scale, d_original_p0, c0, c2, c4, t);
+		itp << <dimGrid, dimBlock >> > (d_oddPsi, d_evenPsi, d_lapind, d_hodges, {0}, dimensions, block_scale, d_original_p0, c0, c2, c4, t);
 		// Normalize
-		normalize_h(dimGrid, dimBlock, d_density, d_oddPsis[0], dimensions, bodies, volume);
+		normalize_h(dimGrid, dimBlock, d_density, d_oddPsi, dimensions, bodies, volume);
 
 		// Take an imaginary time step
-		itp << <dimGrid, dimBlock >> > (d_evenPsis[0], d_oddPsis[0], d_lapind, d_hodges, { 0 }, dimensions, block_scale, d_original_p0, c0, c2, c4, t);
+		itp << <dimGrid, dimBlock >> > (d_evenPsi, d_oddPsi, d_lapind, d_hodges, { 0 }, dimensions, block_scale, d_original_p0, c0, c2, c4, t);
 		// Normalize
-		normalize_h(dimGrid, dimBlock, d_density, d_evenPsis[0], dimensions, bodies, volume);
+		normalize_h(dimGrid, dimBlock, d_density, d_evenPsi, dimensions, bodies, volume);
 
 		//energy_h(dimGrid, dimBlock, d_energy, d_evenPsi, d_pot, d_lapind, d_hodges, g, dimensions, volume, bodies);
 		//double hDensity = 0;
@@ -1599,21 +1649,24 @@ uint integrateInTime(const double block_scale, const Vector3& minp, const Vector
 	std::string mkdirOptions = "-p ";
 #endif
 
-	std::string dirPrefix = phaseToString(initPhase) + dirSeparator + toStringShort(HOLD_TIME)+"us_winding" + dirSeparator + toString(relativePhase / PI * 180.0, 2) + "_deg_phase" + dirSeparator + getProjectionString() + dirSeparator;
+	std::string dirPrefix = "NoSCALING112"+ dirSeparator + phaseToString(initPhase) + dirSeparator +
+					toStringShort(HOLD_TIME) + "us_winding" + dirSeparator +
+					toString(relativePhase / PI * 180.0, 2) + "_deg_phase" + dirSeparator +
+					getProjectionString() + dirSeparator;
 
 	std::string densDir = dirPrefix; // +"dens";
-	//std::string vtksDir = dirPrefix + "dens_vtks";
-	//std::string spinorVtksDir = dirPrefix + "spinor_vtks";
+	std::string vtksDir = dirPrefix + "dens_vtks";
+	std::string spinorVtksDir = dirPrefix + "spinor_vtks";
 	std::string datsDir = dirPrefix + "dats";
 	//
 	std::string createResultsDirCommand = "mkdir " + mkdirOptions + densDir;
-	//std::string createVtksDirCommand = "mkdir " + mkdirOptions + vtksDir;
-	//std::string createSpinorVtksDirCommand = "mkdir " + mkdirOptions + spinorVtksDir;
+	std::string createVtksDirCommand = "mkdir " + mkdirOptions + vtksDir;
+	std::string createSpinorVtksDirCommand = "mkdir " + mkdirOptions + spinorVtksDir;
 	std::string createDatsDirCommand = "mkdir " + mkdirOptions + datsDir;
 	system(createResultsDirCommand.c_str());
-	//system(createVtksDirCommand.c_str());
-	//system(createSpinorVtksDirCommand.c_str());
-	//system(createDatsDirCommand.c_str());
+	system(createVtksDirCommand.c_str());
+	system(createSpinorVtksDirCommand.c_str());
+	system(createDatsDirCommand.c_str());
 
 	double expansionBlockScale = block_scale;
 	double3 expansion_p0 = d_original_p0;
@@ -1630,7 +1683,7 @@ uint integrateInTime(const double block_scale, const Vector3& minp, const Vector
 		Bs.Bb = BzScale * signal.Bb;
 		Bs.BqQuad = BqQuadScale * signal.Bq;
 		Bs.BbQuad = BzQuadScale * signal.Bb;
-		leapfrog << <dimGrid, dimBlock >> > (d_oddPsis[0], d_evenPsis[0], d_lapind, d_hodges, Bs, dimensions, expansionBlockScale, d_original_p0, c0, c2, c4, alpha, t);
+		leapfrog << <dimGrid, dimBlock >> > (d_oddPsi, d_evenPsi, d_lapind, d_hodges, Bs, dimensions, expansionBlockScale, d_original_p0, c0, c2, c4, alpha, t);
 		//densityStr += std::to_string(getDensity(dimGrid, dimBlock, d_density, d_oddPsi, dimensions, bodies, volume)) + ", ";
 		//tString += std::to_string(t) + ", ";
 		//std::cout << std::to_string(signal.Bq) + ", ";
@@ -1644,7 +1697,7 @@ uint integrateInTime(const double block_scale, const Vector3& minp, const Vector
 		Bs.Bb = BzScale * signal.Bb;
 		Bs.BqQuad = BqQuadScale * signal.Bq;
 		Bs.BbQuad = BzQuadScale * signal.Bb;
-		leapfrog << <dimGrid, dimBlock >> > (d_evenPsis[0], d_oddPsis[0], d_lapind, d_hodges, Bs, dimensions, expansionBlockScale, d_original_p0, c0, c2, c4, alpha, t);
+		leapfrog << <dimGrid, dimBlock >> > (d_evenPsi, d_oddPsi, d_lapind, d_hodges, Bs, dimensions, expansionBlockScale, d_original_p0, c0, c2, c4, alpha, t);
 		//densityStr += std::to_string(getDensity(dimGrid, dimBlock, d_density, d_evenPsi, dimensions, bodies, volume)) + ", ";
 		//tString += std::to_string(t) + ", ";
 		//std::cout << std::to_string(signal.Bq) + ", ";
@@ -1681,25 +1734,22 @@ uint integrateInTime(const double block_scale, const Vector3& minp, const Vector
 				const double prevScale = expansionBlockScale;
 				const double3 prev_p0 = expansion_p0;
 
+				// calculate expansion scale
+				double k = interpolate_k(t, t_data, k_data);
 				expansionBlockScale += dt / omega_r * 1e3 * k * block_scale;
 				expansion_p0 = compute_p0(expansionBlockScale, xsize, ysize, zsize);
-				volume = expansionBlockScale * expansionBlockScale * block_scale * VOLUME;
+				volume = expansionBlockScale * expansionBlockScale * expansionBlockScale * VOLUME;
 
-				const uint32_t nextBufferIdx = (bufferIdx + 1) % BUFFER_COUNT;
+				// normalize_h(dimGrid, dimBlock, d_density, d_evenPsi, dimensions, bodies, volume);
+				// normalize_h(dimGrid, dimBlock, d_density, d_oddPsi, dimensions, bodies, volume);
 
-				interpolate << <dimGrid, dimBlock >> > (d_evenPsis[nextBufferIdx], d_evenPsis[bufferIdx], d_lapind, d_hodges, dimensions, prev_p0, expansion_p0, prevScale, expansionBlockScale);
-				normalize_h(dimGrid, dimBlock, d_density, d_evenPsis[nextBufferIdx], dimensions, bodies, volume);
-				interpolate << <dimGrid, dimBlock >> > (d_oddPsis[nextBufferIdx], d_oddPsis[bufferIdx], d_lapind, d_hodges, dimensions, prev_p0, expansion_p0, prevScale, expansionBlockScale);
-				normalize_h(dimGrid, dimBlock, d_density, d_oddPsis[nextBufferIdx], dimensions, bodies, volume);
-
-				bufferIdx = nextBufferIdx;
 			}
 			signal = getSignal(t);
 			Bs.Bq = BqScale * signal.Bq;
 			Bs.Bb = BzScale * signal.Bb;
 			Bs.BqQuad = BqQuadScale * signal.Bq;
 			Bs.BbQuad = BzQuadScale * signal.Bb;
-			leapfrog << <dimGrid, dimBlock >> > (d_oddPsis[bufferIdx], d_evenPsis[bufferIdx], d_lapind, d_hodges, Bs, dimensions, expansionBlockScale, expansion_p0, c0, c2, c4, alpha, t);
+			leapfrog << <dimGrid, dimBlock >> > (d_oddPsi, d_evenPsi, d_lapind, d_hodges, Bs, dimensions, expansionBlockScale, expansion_p0, c0, c2, c4, alpha, t);
 
 			// update even values
 			t += dt / omega_r * 1e3; // [ms]
@@ -1708,28 +1758,25 @@ uint integrateInTime(const double block_scale, const Vector3& minp, const Vector
 				const double prevScale = expansionBlockScale;
 				const double3 prev_p0 = expansion_p0;
 
+				// calculate expansion scale
+				double k = interpolate_k(t, t_data, k_data);
 				expansionBlockScale += dt / omega_r * 1e3 * k * block_scale;
 				expansion_p0 = compute_p0(expansionBlockScale, xsize, ysize, zsize);
-				volume = expansionBlockScale * expansionBlockScale * block_scale * VOLUME;
+				volume = expansionBlockScale * expansionBlockScale * expansionBlockScale * VOLUME;
 
-				const uint32_t nextBufferIdx = (bufferIdx + 1) % BUFFER_COUNT;
+				normalize_h(dimGrid, dimBlock, d_density, d_evenPsi, dimensions, bodies, volume);
+				normalize_h(dimGrid, dimBlock, d_density, d_oddPsi, dimensions, bodies, volume);
 
-				interpolate << <dimGrid, dimBlock >> > (d_evenPsis[nextBufferIdx], d_evenPsis[bufferIdx], d_lapind, d_hodges, dimensions, prev_p0, expansion_p0, prevScale, expansionBlockScale);
-				normalize_h(dimGrid, dimBlock, d_density, d_evenPsis[nextBufferIdx], dimensions, bodies, volume);
-				interpolate << <dimGrid, dimBlock >> > (d_oddPsis[nextBufferIdx], d_oddPsis[bufferIdx], d_lapind, d_hodges, dimensions, prev_p0, expansion_p0, prevScale, expansionBlockScale);
-				normalize_h(dimGrid, dimBlock, d_density, d_oddPsis[nextBufferIdx], dimensions, bodies, volume);
-
-				bufferIdx = nextBufferIdx;
 			}
 			signal = getSignal(t);
 			Bs.Bq = BqScale * signal.Bq;
 			Bs.Bb = BzScale * signal.Bb;
 			Bs.BqQuad = BqQuadScale * signal.Bq;
 			Bs.BbQuad = BzQuadScale * signal.Bb;
-			leapfrog << <dimGrid, dimBlock >> > (d_evenPsis[bufferIdx], d_oddPsis[bufferIdx], d_lapind, d_hodges, Bs, dimensions, expansionBlockScale, expansion_p0, c0, c2, c4, alpha, t);
+			leapfrog << <dimGrid, dimBlock >> > (d_evenPsi, d_oddPsi, d_lapind, d_hodges, Bs, dimensions, expansionBlockScale, expansion_p0, c0, c2, c4, alpha, t);
 		}
 #if SAVE_PICTURE
-		std::cout << "N = " << getDensity(dimGrid, dimBlock, d_density, d_oddPsis[0], dimensions, bodies, volume) << std::endl;
+		std::cout << "N = " << getDensity(dimGrid, dimBlock, d_density, d_oddPsi, dimensions, bodies, volume) << std::endl;
 
 		// Copy back from device memory to host memory
 		checkCudaErrors(cudaMemcpy3D(&oddPsiBackParams));
@@ -1752,8 +1799,8 @@ uint integrateInTime(const double block_scale, const Vector3& minp, const Vector
 		static bool savedState = false;
 		if (t >= 15.0 && !savedState)
 		{
-			//saveVolume(vtksDir, h_oddPsi, bsize, dxsize, dysize, dzsize, expansionBlockScale, d_p0, t - STATE_PREP_DURATION);
-			//saveSpinor(spinorVtksDir, h_oddPsi, bsize, dxsize, dysize, dzsize, expansionBlockScale, d_p0, t - STATE_PREP_DURATION);
+			saveVolume(vtksDir, h_oddPsi, bsize, dxsize, dysize, dzsize, expansionBlockScale, expansion_p0, t - STATE_PREP_DURATION);
+			saveSpinor(spinorVtksDir, h_oddPsi, bsize, dxsize, dysize, dzsize, expansionBlockScale, expansion_p0, t - STATE_PREP_DURATION);
 
 			std::ofstream oddFs(datsDir + "/" + toString(t) + ".dat", std::ios::binary | std::ios_base::trunc);
 			if (oddFs.fail() != 0) return 1;
@@ -1778,12 +1825,8 @@ uint integrateInTime(const double block_scale, const Vector3& minp, const Vector
 		fprintf(stderr, "Failed to launch kernels (error code %s)!\n", cudaGetErrorString(err));
 		exit(EXIT_FAILURE);
 	}
-
-	for (int i = 0; i < BUFFER_COUNT; ++i)
-	{
-		checkCudaErrors(cudaFree(d_cudaEvenPsis[i].ptr));
-		checkCudaErrors(cudaFree(d_cudaOddPsis[i].ptr));
-	}
+	checkCudaErrors(cudaFree(d_cudaEvenPsi.ptr));
+	checkCudaErrors(cudaFree(d_cudaOddPsi.ptr));
 	checkCudaErrors(cudaFree(d_spinNorm));
 	checkCudaErrors(cudaFree(d_density));
 	checkCudaErrors(cudaFree(d_localAvgSpin));
@@ -1835,6 +1878,15 @@ int main(int argc, char** argv)
 		std::cout << "Read config " << argv[1] << std::endl;
 		readConfFile(std::string(argv[1]));
 	}
+
+	std::string k_castin_dum = "lambdas.h5"; // "equal_lambdas.h5" for equal trap frequencies
+    load_k_data(k_castin_dum, t_data, k_data);
+	std::cout << "Loaded k data" << std::endl;
+
+	// std::cout << "Expansion Constant k = "<< k << std::endl;
+	std::cout << "Grid scaling start time = " << GRID_SCALING_START << " ms" << std::endl;
+	// std::cout << "Grid scaling interval = " << SCALING_INTERVAL << " ms" << std::endl;
+	std::cout << "Hold time = " << HOLD_TIME << " ms" << std::endl;
 
 	std::cout << "Start simulating from t = " << t << " ms, with a time step size of " << dt << "." << std::endl;
 	std::cout << "The simulation will end at " << END_TIME << " ms." << std::endl;
