@@ -65,7 +65,6 @@ constexpr double OPT_TRAP_OFF = STATE_PREP_DURATION + CREATION_RAMP_DURATION + T
 constexpr double GRADIENT_OFF_DELAY = 0.010;
 constexpr double GRADIENT_OFF_DUARATION = 0.034;
 constexpr double GRID_SCALING_START = 24; // ms
-// const double SCALING_INTERVAL = 1e-5;
 
 //#include "AliceRingRamps.h"
 #include "KnotRamps.h"
@@ -81,7 +80,6 @@ constexpr double GRID_SCALING_START = 24; // ms
 #include <random>
 
 #include "mesh.h"
-
 #include "calculate_k.h"
 std::vector<double> t_data;
 std::vector<double> k_data;
@@ -93,7 +91,7 @@ std::vector<double> k_data;
 #define USE_QUADRUPOLE_OFFSET 0
 #define USE_INITIAL_NOISE 0
 
-#define SAVE_STATES 1
+#define SAVE_STATES 0
 #define SAVE_PICTURE 1
 
 #define THREAD_BLOCK_X 16
@@ -104,7 +102,7 @@ constexpr double DOMAIN_SIZE_X = 20.0; //24.0;
 constexpr double DOMAIN_SIZE_Y = 20.0; //24.0;
 constexpr double DOMAIN_SIZE_Z = 20.0; //24.0;
 
-constexpr double REPLICABLE_STRUCTURE_COUNT_X =112.0;
+constexpr double REPLICABLE_STRUCTURE_COUNT_X = 56.0;
 //constexpr double REPLICABLE_STRUCTURE_COUNT_Y = 112.0;
 //constexpr double REPLICABLE_STRUCTURE_COUNT_Z = 112.0;
 
@@ -160,7 +158,7 @@ std::string toStringShort(const double value)
 };
 
 const std::string GROUND_STATE_FILENAME = "ground_state_psi_" + toStringShort(DOMAIN_SIZE_X) + "_" + toStringShort(REPLICABLE_STRUCTURE_COUNT_X) + ".dat";
-constexpr double NOISE_AMPLITUDE = 0.1; //0.1;
+constexpr double NOISE_AMPLITUDE = 0; //0.1;
 
 //constexpr double dt = 1e-4; // 1 x // Before the monopole creation ramp (0 - 200 ms)
 constexpr double dt = 1e-5; // 0.1 x // During and after the monopole creation ramp (200 ms - )
@@ -171,7 +169,6 @@ const uint IMAGE_SAVE_FREQUENCY = uint(IMAGE_SAVE_INTERVAL * 0.5 / 1e3 * omega_r
 const uint STATE_SAVE_INTERVAL = 10.0; // ms
 
 double t = 0; // Start time in ms
-double last_scaling_t = GRID_SCALING_START;
 constexpr double END_TIME = OPT_TRAP_OFF + GRADIENT_OFF_DELAY + GRADIENT_OFF_DUARATION + 24.0; // End time in ms
 
 double relativePhase = 0; // 5.105088062083414; // In radians
@@ -821,7 +818,6 @@ __global__ void forwardEuler(PitchedPtr nextStep, PitchedPtr prevStep, int4* __r
 	double2 c45 = denominator - 0.4 * c4 * prev.s2 * conj(prev.s1);
 	double2 c13 = 0.2 * c4 * prev.s0 * conj(prev.s_2);
 	double2 c35 = 0.2 * c4 * prev.s2 * conj(prev.s0);
-
 	double2 c23 = sqrt(1.5) * denominator - 0.2 * c4 * prev.s0 * conj(prev.s_1);
 	double2 c34 = sqrt(1.5) * denominator - 0.2 * c4 * prev.s1 * conj(prev.s0);
 
@@ -969,8 +965,6 @@ __global__ void leapfrog(PitchedPtr nextStep, PitchedPtr prevStep, const int4* _
 	double2 c45 = denominator - 0.4 * c4 * prev.s2 * conj(prev.s1);
 	double2 c13 = 0.2 * c4 * prev.s0 * conj(prev.s_2);
 	double2 c35 = 0.2 * c4 * prev.s2 * conj(prev.s0);
-	// double2 c13 = {0.0, 0.0};
-	// double2 c35 = {0.0, 0.0};
 	double2 c23 = sqrt(1.5) * denominator - 0.2 * c4 * prev.s0 * conj(prev.s_1);
 	double2 c34 = sqrt(1.5) * denominator - 0.2 * c4 * prev.s1 * conj(prev.s0);
 
@@ -1008,46 +1002,6 @@ __device__ 	double3 getGlobalPos(int blockX, int blockY, int blockZ, int cellIdx
 			 p0.y + blockScale * (blockY * BLOCK_WIDTH_Y + local.y),
 			 p0.z + blockScale * (blockZ * BLOCK_WIDTH_Z + local.z) };
 };
-
-__global__ void scale(PitchedPtr nextStep, PitchedPtr prevStep, const int4* __restrict__ laplace, const double* __restrict__ hodges, const uint3 dimensions, const double3 prev_p0, const double3 new_p0, const double prevScale, const double newScale)
-{
-	const size_t xid = blockIdx.x * blockDim.x + threadIdx.x;
-	const size_t yid = blockIdx.y * blockDim.y + threadIdx.y;
-	const size_t zid = blockIdx.z * blockDim.z + threadIdx.z;
-	const size_t dataXid = xid / VALUES_IN_BLOCK; // One thread per every dual node so VALUES_IN_BLOCK threads per mesh block (on x-axis)
-	const size_t dualNodeId = xid % VALUES_IN_BLOCK; // Dual node id. One thread per every dual node so VALUES_IN_BLOCK threads per mesh block (on x-axis)
-
-	// Exit leftover threads
-	if (dataXid > dimensions.x || yid > dimensions.y || zid > dimensions.z)
-	{
-		return;
-	}
-
-	const size_t localDataXid = threadIdx.x / VALUES_IN_BLOCK;
-
-	__shared__ BlockPsis ldsPrevPsis[THREAD_BLOCK_Z * THREAD_BLOCK_Y * THREAD_BLOCK_X];
-	const size_t threadIdxInBlock = threadIdx.z * THREAD_BLOCK_Y * THREAD_BLOCK_X + threadIdx.y * THREAD_BLOCK_X + localDataXid;
-
-	// Calculate the pointers for this block
-	char* prevPsi = prevStep.ptr + prevStep.slicePitch * zid + prevStep.pitch * yid + sizeof(BlockPsis) * dataXid;
-	BlockPsis* nextPsi = (BlockPsis*)(nextStep.ptr + nextStep.slicePitch * zid + nextStep.pitch * yid) + dataXid;
-
-	// Update psi
-	const Complex5Vec prev = ((BlockPsis*)prevPsi)->values[dualNodeId];
-
-	// Kill also the leftover edge threads
-	if (dataXid == dimensions.x || yid == dimensions.y || zid == dimensions.z)
-	{
-		return;
-	}
-	__syncthreads();
-
-	double3 prevPos = getGlobalPos(dataXid, yid, zid, dualNodeId, prevScale, prev_p0);
-	double3 newPos = getGlobalPos(dataXid, yid, zid, dualNodeId, newScale, new_p0);
-
-	nextPsi->values[dualNodeId] = prev;
-}
-
 
 // __global__ void interpolate(PitchedPtr nextStep, PitchedPtr prevStep, const int4* __restrict__ laplace, const double* __restrict__ hodges, const uint3 dimensions, const double3 prev_p0, const double3 new_p0, const double prevScale, const double newScale)
 // {
@@ -1173,17 +1127,17 @@ __global__ void scale(PitchedPtr nextStep, PitchedPtr prevStep, const int4* __re
 
 // 	nextPsi->values[dualNodeId] = interpolated;
 // }
-//void energy_h(dim3 dimGrid, dim3 dimBlock, double* energyPtr, PitchedPtr psi, PitchedPtr potentials, int4* lapInd, double* hodges, double g, uint3 dimensions, double volume, size_t bodies)
-//{
-//	energy << <dimGrid, dimBlock >> > (energyPtr, psi, potentials, lapInd, hodges, g, dimensions, volume);
-//	int prevStride = bodies;
-//	while (prevStride > 1)
-//	{
-//		int newStride = prevStride / 2;
-//		integrate << <dim3(std::ceil(newStride / 32.0), 1, 1), dim3(32, 1, 1) >> > (energyPtr, newStride, ((newStride * 2) != prevStride));
-//		prevStride = newStride;
-//	}
-//}
+// //void energy_h(dim3 dimGrid, dim3 dimBlock, double* energyPtr, PitchedPtr psi, PitchedPtr potentials, int4* lapInd, double* hodges, double g, uint3 dimensions, double volume, size_t bodies)
+// //{
+// //	energy << <dimGrid, dimBlock >> > (energyPtr, psi, potentials, lapInd, hodges, g, dimensions, volume);
+// //	int prevStride = bodies;
+// //	while (prevStride > 1)
+// //	{
+// //		int newStride = prevStride / 2;
+// //		integrate << <dim3(std::ceil(newStride / 32.0), 1, 1), dim3(32, 1, 1) >> > (energyPtr, newStride, ((newStride * 2) != prevStride));
+// //		prevStride = newStride;
+// //	}
+// //}
 
 void normalize_h(dim3 dimGrid, dim3 dimBlock, double* densityPtr, PitchedPtr psi, uint3 dimensions, size_t bodies, double volume)
 {
@@ -1287,14 +1241,6 @@ uint integrateInTime(const double block_scale, const Vector3& minp, const Vector
 	const size_t dzsize = zsize + 2; // One element buffer to both ends
 	cudaExtent psiExtent = make_cudaExtent(dxsize * sizeof(BlockPsis), dysize, dzsize);
 
-	// static constexpr uint32_t BUFFER_COUNT = 2;
-	// cudaPitchedPtr d_cudaEvenPsis[BUFFER_COUNT];
-	// cudaPitchedPtr d_cudaOddPsis[BUFFER_COUNT];
-	// for (int i = 0; i < 2; ++i)
-	// {
-	// 	checkCudaErrors(cudaMalloc3D(&d_cudaEvenPsis[i], psiExtent));
-	// 	checkCudaErrors(cudaMalloc3D(&d_cudaOddPsis[i], psiExtent));
-	// }
 	cudaPitchedPtr d_cudaEvenPsi;
 	cudaPitchedPtr d_cudaOddPsi;
 	checkCudaErrors(cudaMalloc3D(&d_cudaEvenPsi, psiExtent));
@@ -1314,7 +1260,6 @@ uint integrateInTime(const double block_scale, const Vector3& minp, const Vector
 	checkCudaErrors(cudaMalloc(&d_u, bodies * sizeof(double3)));
 	checkCudaErrors(cudaMalloc(&d_v, bodies * sizeof(double3)));
 	checkCudaErrors(cudaMalloc(&d_theta, bodies * sizeof(double)));
-
 	size_t offset = d_cudaEvenPsi.pitch * dysize + d_cudaEvenPsi.pitch + sizeof(BlockPsis);
 	PitchedPtr d_evenPsi = { (char*)d_cudaEvenPsi.ptr + offset, d_cudaEvenPsi.pitch, d_cudaEvenPsi.pitch * dysize };
 	PitchedPtr d_oddPsi = { (char*)d_cudaOddPsi.ptr + offset, d_cudaOddPsi.pitch, d_cudaOddPsi.pitch * dysize };
@@ -1649,10 +1594,10 @@ uint integrateInTime(const double block_scale, const Vector3& minp, const Vector
 	std::string mkdirOptions = "-p ";
 #endif
 
-	std::string dirPrefix = "NoSCALING112"+ dirSeparator + phaseToString(initPhase) + dirSeparator +
-					toStringShort(HOLD_TIME) + "us_winding" + dirSeparator +
-					toString(relativePhase / PI * 180.0, 2) + "_deg_phase" + dirSeparator +
-					getProjectionString() + dirSeparator;
+	std::string dirPrefix = "Modifiedagain_noscale"+ dirSeparator + phaseToString(initPhase) + dirSeparator +
+	toStringShort(HOLD_TIME) + "us_winding" + dirSeparator +
+	toString(relativePhase / PI * 180.0, 2) + "_deg_phase" + dirSeparator +
+	getProjectionString() + dirSeparator;
 
 	std::string densDir = dirPrefix; // +"dens";
 	std::string vtksDir = dirPrefix + "dens_vtks";
@@ -1740,9 +1685,8 @@ uint integrateInTime(const double block_scale, const Vector3& minp, const Vector
 				expansion_p0 = compute_p0(expansionBlockScale, xsize, ysize, zsize);
 				volume = expansionBlockScale * expansionBlockScale * expansionBlockScale * VOLUME;
 
-				// normalize_h(dimGrid, dimBlock, d_density, d_evenPsi, dimensions, bodies, volume);
-				// normalize_h(dimGrid, dimBlock, d_density, d_oddPsi, dimensions, bodies, volume);
-
+				normalize_h(dimGrid, dimBlock, d_density, d_evenPsi, dimensions, bodies, volume);
+				normalize_h(dimGrid, dimBlock, d_density, d_oddPsi, dimensions, bodies, volume);
 			}
 			signal = getSignal(t);
 			Bs.Bq = BqScale * signal.Bq;
@@ -1766,7 +1710,6 @@ uint integrateInTime(const double block_scale, const Vector3& minp, const Vector
 
 				normalize_h(dimGrid, dimBlock, d_density, d_evenPsi, dimensions, bodies, volume);
 				normalize_h(dimGrid, dimBlock, d_density, d_oddPsi, dimensions, bodies, volume);
-
 			}
 			signal = getSignal(t);
 			Bs.Bq = BqScale * signal.Bq;
@@ -1804,13 +1747,13 @@ uint integrateInTime(const double block_scale, const Vector3& minp, const Vector
 
 			std::ofstream oddFs(datsDir + "/" + toString(t) + ".dat", std::ios::binary | std::ios_base::trunc);
 			if (oddFs.fail() != 0) return 1;
-			oddFs.write((char*)&h_oddPsi[0], hostSize * sizeof(BlockPsis));
+			oddFs.write((char*)&h_oddPso, hostSize * sizeof(BlockPsis));
 			oddFs.close();
 
 			checkCudaErrors(cudaMemcpy3D(&evenPsiBackParams));
 			std::ofstream evenFs(datsDir + "/" + "even_" + toString(t) + ".dat", std::ios::binary | std::ios_base::trunc);
 			if (evenFs.fail() != 0) return 1;
-			evenFs.write((char*)&h_evenPsi[0], hostSize * sizeof(BlockPsis));
+			evenFs.write((char*)&h_evenPso, hostSize * sizeof(BlockPsis));
 			evenFs.close();
 
 			savedState = true;
@@ -1825,6 +1768,7 @@ uint integrateInTime(const double block_scale, const Vector3& minp, const Vector
 		fprintf(stderr, "Failed to launch kernels (error code %s)!\n", cudaGetErrorString(err));
 		exit(EXIT_FAILURE);
 	}
+
 	checkCudaErrors(cudaFree(d_cudaEvenPsi.ptr));
 	checkCudaErrors(cudaFree(d_cudaOddPsi.ptr));
 	checkCudaErrors(cudaFree(d_spinNorm));
@@ -1878,16 +1822,12 @@ int main(int argc, char** argv)
 		std::cout << "Read config " << argv[1] << std::endl;
 		readConfFile(std::string(argv[1]));
 	}
-
 	std::string k_castin_dum = "lambdas.h5"; // "equal_lambdas.h5" for equal trap frequencies
     load_k_data(k_castin_dum, t_data, k_data);
 	std::cout << "Loaded k data" << std::endl;
 
-	// std::cout << "Expansion Constant k = "<< k << std::endl;
 	std::cout << "Grid scaling start time = " << GRID_SCALING_START << " ms" << std::endl;
-	// std::cout << "Grid scaling interval = " << SCALING_INTERVAL << " ms" << std::endl;
 	std::cout << "Hold time = " << HOLD_TIME << " ms" << std::endl;
-
 	std::cout << "Start simulating from t = " << t << " ms, with a time step size of " << dt << "." << std::endl;
 	std::cout << "The simulation will end at " << END_TIME << " ms." << std::endl;
 	//std::cout << "Block scale = " << blockScale << std::endl;
