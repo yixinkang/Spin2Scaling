@@ -35,15 +35,15 @@ const std::vector<RampType> BbTypes = { RampType::CONSTANT, RampType::LINEAR, Ra
 
 
 ## Citation
-cff-version: 1.2.0
-message: "If you use this software, please cite it as below."
-authors:
-- family-names: "Kivioja"
-  given-names: "Markus"
-- family-names: "Räbinä"
-  given-names: "Jukka"
-title: "GPU-accelerated DEC-based Gross-Pitaevskii solver"
-version: 1.0-alpha
-doi: 10.5281/zenodo.5700296
-date-released: 2021-11-14
-url: "https://github.com/markus-kivioja/GpuDecGpe"
+If you use this software, please cite it as below.
+```bibtex
+@software{Kivioja_GPU_DEC_GPE_2021,
+  author       = {Markus Kivioja and Jukka Räbinä},
+  title        = {GPU-accelerated DEC-based Gross-Pitaevskii solver},
+  version      = {1.0-alpha},
+  doi          = {10.5281/zenodo.5700296},
+  url          = {https://github.com/markus-kivioja/GpuDecGpe},
+  date         = {2021-11-14},
+  note         = {If you use this software, please cite it as above.}
+}
+```
