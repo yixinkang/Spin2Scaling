@@ -847,7 +847,7 @@ __global__ void forwardEuler(PitchedPtr nextStep, PitchedPtr prevStep, int4* __r
 	nextPsi->values[dualNodeId].s_2 = prev.s_2 + dt * double2{ H.s_2.y, -H.s_2.x };
 };
 
-__global__ void leapfrog(PitchedPtr nextStep, PitchedPtr prevStep, const int4* __restrict__ laplace, const double* __restrict__ hodges, MagFields Bs, const uint3 dimensions, const double block_scale, const double v, const double3 p0, const double c0, const double c2, const double c4, double alpha, double t)
+__global__ void leapfrog(PitchedPtr nextStep, PitchedPtr prevStep, const int4* __restrict__ laplace, const double* __restrict__ hodges, MagFields Bs, const uint3 dimensions, const double block_scale, const double normFactor, const double3 p0, const double c0, const double c2, const double c4, double alpha, double t)
 {
 	const size_t xid = blockIdx.x * blockDim.x + threadIdx.x;
 	const size_t yid = blockIdx.y * blockDim.y + threadIdx.y;
@@ -992,10 +992,7 @@ __global__ void leapfrog(PitchedPtr nextStep, PitchedPtr prevStep, const int4* _
 	nextPsi->values[dualNodeId].s_1 += 2 * dt * double2{ H.s_1.y, -H.s_1.x };
 	nextPsi->values[dualNodeId].s_2 += 2 * dt * double2{ H.s_2.y, -H.s_2.x };
 
-	// normalization
-	double expansionBlockScaleNext =  (1+ dt / omega_r * 1e3 * v)* block_scale;
-	double normFactor = pow(expansionBlockScaleNext / block_scale, 1.5);
-
+	//normalization
 	nextPsi->values[dualNodeId].s2 = nextPsi->values[dualNodeId].s2 / normFactor;
 	nextPsi->values[dualNodeId].s1 = nextPsi->values[dualNodeId].s1 / normFactor;
 	nextPsi->values[dualNodeId].s0 = nextPsi->values[dualNodeId].s0 / normFactor;
@@ -1368,6 +1365,8 @@ uint integrateInTime(const double block_scale, const Vector3& minp, const Vector
 		}
 
 		std::cout << "Total density: " << getDensity(dimGrid, dimBlock, d_density, d_oddPsi, dimensions, bodies, volume) << std::endl;
+
+		//add normalization here
 	}
 
 	// Take one forward Euler step if starting from the ground state or time step changed
@@ -1468,7 +1467,7 @@ uint integrateInTime(const double block_scale, const Vector3& minp, const Vector
 	std::string mkdirOptions = "-p ";
 #endif
 
-	std::string dirPrefix = "WithoutNorm56"+ dirSeparator + phaseToString(initPhase) + dirSeparator +
+	std::string dirPrefix = "TryScale_norm"+ dirSeparator + phaseToString(initPhase) + dirSeparator +
 	toStringShort(HOLD_TIME) + "us_winding" + dirSeparator +
 	toString(relativePhase / PI * 180.0, 2) + "_deg_phase" + dirSeparator +
 	getProjectionString() + dirSeparator;
@@ -1489,6 +1488,11 @@ uint integrateInTime(const double block_scale, const Vector3& minp, const Vector
 
 	double expansionBlockScale = block_scale;
 	double3 expansion_p0 = d_original_p0;
+	double normFactor = 1.0;
+
+	double k = 0.;
+	double knext = 0.;
+	double scale = 1.0;
 
 	// Measure wall clock time
 	static auto prevTime = std::chrono::high_resolution_clock::now();
@@ -1502,7 +1506,7 @@ uint integrateInTime(const double block_scale, const Vector3& minp, const Vector
 		Bs.Bb = BzScale * signal.Bb;
 		Bs.BqQuad = BqQuadScale * signal.Bq;
 		Bs.BbQuad = BzQuadScale * signal.Bb;
-		leapfrog << <dimGrid, dimBlock >> > (d_oddPsi, d_evenPsi, d_lapind, d_hodges, Bs, dimensions, expansionBlockScale,0, d_original_p0, c0, c2, c4, alpha, t);
+		leapfrog << <dimGrid, dimBlock >> > (d_oddPsi, d_evenPsi, d_lapind, d_hodges, Bs, dimensions, expansionBlockScale, normFactor, d_original_p0,  c0, c2, c4, alpha, t);
 		//densityStr += std::to_string(getDensity(dimGrid, dimBlock, d_density, d_oddPsi, dimensions, bodies, volume)) + ", ";
 		//tString += std::to_string(t) + ", ";
 		//std::cout << std::to_string(signal.Bq) + ", ";
@@ -1516,7 +1520,7 @@ uint integrateInTime(const double block_scale, const Vector3& minp, const Vector
 		Bs.Bb = BzScale * signal.Bb;
 		Bs.BqQuad = BqQuadScale * signal.Bq;
 		Bs.BbQuad = BzQuadScale * signal.Bb;
-		leapfrog << <dimGrid, dimBlock >> > (d_evenPsi, d_oddPsi, d_lapind, d_hodges, Bs, dimensions, expansionBlockScale,0, d_original_p0, c0, c2, c4, alpha, t);
+		leapfrog << <dimGrid, dimBlock >> > (d_evenPsi, d_oddPsi, d_lapind, d_hodges, Bs, dimensions, expansionBlockScale, normFactor, d_original_p0, c0, c2, c4, alpha, t);
 		//densityStr += std::to_string(getDensity(dimGrid, dimBlock, d_density, d_evenPsi, dimensions, bodies, volume)) + ", ";
 		//tString += std::to_string(t) + ", ";
 		//std::cout << std::to_string(signal.Bq) + ", ";
@@ -1539,37 +1543,34 @@ uint integrateInTime(const double block_scale, const Vector3& minp, const Vector
 	drawDensity(densDir, h_oddPsi, dxsize, dysize, dzsize, t - STATE_PREP_DURATION, Bs, d_original_p0, expansionBlockScale);
 #endif
 
-	uint32_t bufferIdx = 0;
-	bool normalized_at_1ms = false;
-
 	while (t < END_TIME)
 	{
+		// normalize before starting grid scaling
+		normalize_h(dimGrid, dimBlock, d_density, d_evenPsi, dimensions, bodies, volume);
+		normalize_h(dimGrid, dimBlock, d_density, d_oddPsi, dimensions, bodies, volume);
+
 		// integrate one iteration
 		for (uint step = 0; step < IMAGE_SAVE_FREQUENCY; step++)
 		{
 			// update odd values
 			t += dt / omega_r * 1e3; // [ms]
-			double v = interpolate_k(t+dt, t_data, k_data);
 			if (t >= GRID_SCALING_START)
 			{
-				const double prevScale = expansionBlockScale;
-				const double3 prev_p0 = expansion_p0;
-
 				// calculate expansion scale
-				double k = interpolate_k(t, t_data, k_data);
+				k = interpolate_k(t - GRID_SCALING_START, t_data, k_data);
 				expansionBlockScale += dt / omega_r * 1e3 * k * block_scale;
 				expansion_p0 = compute_p0(expansionBlockScale, xsize, ysize, zsize);
 				volume = expansionBlockScale * expansionBlockScale * expansionBlockScale * VOLUME;
 
+				//normalization
+				knext = interpolate_k(t+dt - GRID_SCALING_START , t_data, k_data);
+				const double newscale =  dt / omega_r * 1e3 * knext * block_scale;
+				const double epsilon = newscale / expansionBlockScale;
+				scale = 1.0 + epsilon;
+				normFactor = pow(scale,1.5);
+
 				// normalize_h(dimGrid, dimBlock, d_density, d_evenPsi, dimensions, bodies, volume);
 				// normalize_h(dimGrid, dimBlock, d_density, d_oddPsi, dimensions, bodies, volume);
-
-				// if (!normalized_at_1ms && t >= 1.0)
-				// {	std::cout << "Normalizing at 1 ms." << std::endl;
-				// 	normalize_h(dimGrid, dimBlock, d_density, d_evenPsi, dimensions, bodies, volume);
-				// 	normalize_h(dimGrid, dimBlock, d_density, d_oddPsi, dimensions, bodies, volume);
-				// 	normalized_at_1ms = true;
-				// }
 
 			}
 			signal = getSignal(t);
@@ -1577,35 +1578,36 @@ uint integrateInTime(const double block_scale, const Vector3& minp, const Vector
 			Bs.Bb = BzScale * signal.Bb;
 			Bs.BqQuad = BqQuadScale * signal.Bq;
 			Bs.BbQuad = BzQuadScale * signal.Bb;
-			leapfrog << <dimGrid, dimBlock >> > (d_oddPsi, d_evenPsi, d_lapind, d_hodges, Bs, dimensions, expansionBlockScale, v, expansion_p0, c0, c2, c4, alpha, t);
+			leapfrog << <dimGrid, dimBlock >> > (d_oddPsi, d_evenPsi, d_lapind, d_hodges, Bs, dimensions, expansionBlockScale, normFactor, expansion_p0, c0, c2, c4, alpha, t);
 
 			// update even values
 			t += dt / omega_r * 1e3; // [ms]
-			v = interpolate_k(t+dt, t_data, k_data);
 			if (t >= GRID_SCALING_START)
 			{
-				const double prevScale = expansionBlockScale;
-				const double3 prev_p0 = expansion_p0;
-
 				// calculate expansion scale
-				double k = interpolate_k(t, t_data, k_data);
+				k = interpolate_k(t - GRID_SCALING_START , t_data, k_data);
 				expansionBlockScale += dt / omega_r * 1e3 * k * block_scale;
 				expansion_p0 = compute_p0(expansionBlockScale, xsize, ysize, zsize);
 				volume = expansionBlockScale * expansionBlockScale * expansionBlockScale * VOLUME;
 
-				// normalize_h(dimGrid, dimBlock, d_density, d_evenPsi, dimensions, bodies, volume);
-				// normalize_h(dimGrid, dimBlock, d_density, d_oddPsi, dimensions, bodies, volume);
+				//normalization
+				knext = interpolate_k(t+dt - GRID_SCALING_START , t_data, k_data);
+				const double newscale =  dt / omega_r * 1e3 * knext * block_scale;
+				const double epsilon = newscale / expansionBlockScale;
+				scale = 1.0 + epsilon;
+				normFactor = pow(scale,1.5);
+
 			}
 			signal = getSignal(t);
 			Bs.Bq = BqScale * signal.Bq;
 			Bs.Bb = BzScale * signal.Bb;
 			Bs.BqQuad = BqQuadScale * signal.Bq;
 			Bs.BbQuad = BzQuadScale * signal.Bb;
-			leapfrog << <dimGrid, dimBlock >> > (d_evenPsi, d_oddPsi, d_lapind, d_hodges, Bs, dimensions, expansionBlockScale, v, expansion_p0, c0, c2, c4, alpha, t);
+			leapfrog << <dimGrid, dimBlock >> > (d_evenPsi, d_oddPsi, d_lapind, d_hodges, Bs, dimensions, expansionBlockScale, normFactor, expansion_p0, c0, c2, c4, alpha, t);
 		}
 #if SAVE_PICTURE
 		std::cout << "N = " << getDensity(dimGrid, dimBlock, d_density, d_oddPsi, dimensions, bodies, volume) << std::endl;
-
+		// std::cout << "Scale from previous save: " << normFactor * normFactor << std::endl;
 		// Copy back from device memory to host memory
 		checkCudaErrors(cudaMemcpy3D(&oddPsiBackParams));
 
